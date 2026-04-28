@@ -1,0 +1,58 @@
+{
+  "transfer_mode": {
+    "type": "string",
+    "default": "auto",
+    "enum": ["auto", "local", "docker"],
+    "description": "文件传输模式: auto=自动检测(推荐),\n local=本地路径(非Docker使用), \ndocker=HTTP服务器(Docker跨容器必需)"
+  },
+  "max_cache_count": {
+    "type": "int",
+    "default": 20,
+    "minimum": 0,
+    "maximum": 500,
+    "description": "PDF 本地缓存数量上限（0 表示不缓存），默认 20 本，按 LRU 淘汰"
+  },
+  "max_workers": {
+    "type": "int",
+    "default": 4,
+    "minimum": 1,
+    "maximum": 8,
+    "description": "下载线程数"
+  },
+  "image_format": {
+    "type": "string",
+    "default": "webp",
+    "enum": ["webp", "jpg", "png"],
+    "description": "下载图片格式"
+  },
+  "download_timeout": {
+    "type": "int",
+    "default": 300,
+    "description": "下载超时时间（秒）"
+  },
+  "auto_cleanup": {
+    "type": "bool",
+    "default": true,
+    "description": "发送后自动清理临时图片目录"
+  },
+  "pdf_resolution": {
+    "type": "float",
+    "default": 150.0,
+    "description": "PDF 分辨率 DPI"
+  },
+  "max_pdf_size_mb": {
+    "type": "int",
+    "default": 100,
+    "description": "PDF 大小警告阈值(MB)"
+  },
+  "file_server_port": {
+    "type": "int",
+    "default": 18790,
+    "description": "HTTP 文件服务器端口（Docker模式需映射到宿主机）"
+  },
+  "file_server_base_url": {
+    "type": "string",
+    "default": "",
+    "description": "文件服务器外网访问地址，\n如 http://172.17.0.1:18790。\nDocker模式下必填或留空自动推断。"
+  }
+}
