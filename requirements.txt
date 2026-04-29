@@ -1,2 +1,5 @@
 jmcomic>=2.5.0
 Pillow>=9.0.0
+img2pdf>=0.5.0
+pyzipper>=0.3.6
+aiohttp>=3.8.0

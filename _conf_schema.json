@@ -2,57 +2,79 @@
   "transfer_mode": {
     "type": "string",
     "default": "auto",
-    "enum": ["auto", "local", "docker"],
-    "description": "文件传输模式: auto=自动检测(推荐),\n local=本地路径(非Docker使用), \ndocker=HTTP服务器(Docker跨容器必需)"
+    "description": "文件传输模式",
+    "hint": "auto=自动检测(推荐), local=本地路径(非Docker使用), docker=HTTP服务器(Docker跨容器必需)",
+    "options": ["auto", "local", "docker"]
   },
   "max_cache_count": {
     "type": "int",
     "default": 20,
     "minimum": 0,
     "maximum": 500,
-    "description": "PDF 本地缓存数量上限（0 表示不缓存），默认 20 本，按 LRU 淘汰"
+    "description": "PDF 缓存数量上限",
+    "hint": "0 表示不缓存，默认 20 本，按 LRU 淘汰"
   },
   "max_workers": {
     "type": "int",
     "default": 4,
     "minimum": 1,
     "maximum": 8,
-    "description": "下载线程数"
+    "description": "下载线程数",
+    "hint": "建议根据网络状况调整，范围 1~8"
   },
   "image_format": {
     "type": "string",
     "default": "webp",
-    "enum": ["webp", "jpg", "png"],
-    "description": "下载图片格式"
+    "description": "下载图片格式",
+    "hint": "选择从 JMComic 下载的图片原始格式",
+    "options": ["webp", "jpg", "png"]
   },
   "download_timeout": {
     "type": "int",
     "default": 300,
-    "description": "下载超时时间（秒）"
+    "description": "下载超时时间（秒）",
+    "hint": "单本下载的最大等待时间，超时会自动终止任务"
   },
   "auto_cleanup": {
     "type": "bool",
     "default": true,
-    "description": "发送后自动清理临时图片目录"
+    "description": "自动清理临时目录",
+    "hint": "发送完成后是否自动删除下载的原始图片文件夹"
   },
   "pdf_resolution": {
     "type": "float",
     "default": 150.0,
-    "description": "PDF 分辨率 DPI"
+    "description": "PDF 分辨率 DPI",
+    "hint": "影响 PDF 的清晰度与文件大小"
   },
   "max_pdf_size_mb": {
     "type": "int",
     "default": 100,
-    "description": "PDF 大小警告阈值(MB)"
+    "description": "PDF 大小警告阈值(MB)",
+    "hint": "超过此大小会向用户发送警告提示"
   },
   "file_server_port": {
     "type": "int",
     "default": 18790,
-    "description": "HTTP 文件服务器端口（Docker模式需映射到宿主机）"
+    "description": "HTTP 文件服务器端口",
+    "hint": "Docker 模式下需将此端口映射到宿主机"
   },
   "file_server_base_url": {
     "type": "string",
     "default": "",
-    "description": "文件服务器外网访问地址，\n如 http://172.17.0.1:18790。\nDocker模式下必填或留空自动推断。"
+    "description": "文件服务器外网地址",
+    "hint": "如 http://172.17.0.1:18790。Docker 模式下必填或留空自动推断"
+  },
+  "enable_zip": {
+    "type": "bool",
+    "default": false,
+    "description": "启用 ZIP 压缩发送",
+    "hint": "开启后可减小体积并支持密码保护"
+  },
+  "zip_password": {
+    "type": "string",
+    "default": "",
+    "description": "ZIP 压缩包密码",
+    "hint": "留空则不加密，建议使用强密码"
   }
 }
