@@ -181,6 +181,7 @@ hostname -I
 
 | 版本 | 更新内容 |
 |------|----------|
+| 0.0.25 | **PDF 转换性能与稳定性修复**：<br>- 彻底移除灾难性慢速的 DPI 重编码循环（WebP lossless 重编码 10–30s/张，260张 = 43–130 分钟）<br>- 改用 `img2pdf.get_layout_fun()` 在 PDF 层面控制页面尺寸，零额外 I/O<br>- 直接读取图片二进制内容传给 img2pdf，彻底解决路径类型兼容导致的 `TypeError`<br>- 添加 10 分钟超时保护，防止 PDF 转换无限挂起<br>- 添加进度日志，用户可观察转换状态 |  
 | 0.0.24 | **边界容错与诊断增强**：<br>- 子进程增加 `SIGTERM` 信号处理，超时时尽力发送诊断信息而非静默退出<br>- 父进程根据 `exitcode` 提供精准诊断：区分信号杀死（含 OOM Killer 提示）、正常退出未返回、异常崩溃<br>- 移除 `img2pdf.convert` 冗余的 `layout_fun` 参数（与默认行为等价） |
 | 0.0.23 | **架构与健壮性深度修复**：<br>- 将下载 worker 拆分到独立模块 `_download_worker.py`，解决 `multiprocessing.spawn` 重新导入主模块导致插件重复注册的隐患<br>- 修复原地修改图片的副作用：处理 `format=None`、GIF/WebP 质量损失、磁盘写入中断损坏原图等问题（原子写入 + 格式感知质量参数）<br>- 用 `Pipe` 替代 `Queue` 进行进程间通信，消除 `join_thread()` 阻塞事件循环的风险<br>- 缓存锁字典不再只增不减，`finally` 中释放不再使用的锁对象<br>- 收窄裸 `except Exception` 为 `OSError`（文件 IO 操作），避免吞掉 `KeyboardInterrupt`/`SystemExit`<br>- `asyncio.get_event_loop()` 替换为 `asyncio.get_running_loop()`（Python 3.10+ 弃用警告）<br>- `assert` 运行时类型检查替换为显式 `isinstance + raise`<br>- `img2pdf.convert` 使用 `outputstream` 参数直写文件，避免中间 bytes 对象 |
 | 0.0.22 | 新增 `debug_log` 配置项，开启后输出详尽的调试日志（缓存命中、下载参数、文件操作、耗时统计等），方便排查问题 |

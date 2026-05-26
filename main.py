@@ -105,7 +105,7 @@ class FileServer:
         })
 
 
-@register("jmcomic_downloader", "mutidayo3", "JMComic 本子下载器", "0.0.24")
+@register("jmcomic_downloader", "mutidayo3", "JMComic 本子下载器", "0.0.25")
 class JMComicPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -789,58 +789,58 @@ class JMComicPlugin(Star):
         return await loop.run_in_executor(None, _do_compress)
 
     async def _convert_to_pdf(self, image_files: list[Path], album_id: str) -> Path:
-        """使用 img2pdf 将图片转换为 PDF（流式处理，低内存占用）"""
+        """使用 img2pdf 将图片转换为 PDF"""
         pdf_path = self.download_dir / f"{album_id}.pdf"
         logger.info(f"开始生成 PDF (img2pdf): {len(image_files)} 页 -> {pdf_path}")
         self._debug(f"PDF 转换参数: {len(image_files)} 页, DPI={self.pdf_resolution}, 输出={pdf_path}")
 
-        dpi = self.pdf_resolution
         loop = asyncio.get_running_loop()
+        page_count = len(image_files)
+        pdf_timeout = 600  # 10 分钟超时保护
 
-        def _build_pdf_stream():
+        def _do_convert():
             try:
-                from PIL import Image
-                for p in image_files:
-                    with Image.open(p) as img:
-                        fmt = img.format
-                        if fmt is None:
-                            self._debug(f"跳过 DPI 设置（无法识别格式）: {p.name}")
-                            continue
+                import img2pdf
 
-                        save_kwargs = {'dpi': (dpi, dpi)}
-                        if fmt == 'JPEG':
-                            save_kwargs['quality'] = 100
-                            save_kwargs['subsampling'] = 'keep'
-                        elif fmt == 'WEBP':
-                            save_kwargs['quality'] = 100
-                            save_kwargs['lossless'] = True
-                        elif fmt == 'PNG':
-                            save_kwargs['compress_level'] = 1
-                        # GIF/BMP 等：仅设置 DPI，不做质量参数
+                # 直接读取图片二进制内容，彻底避免 img2pdf 路径兼容问题
+                # （部分版本对 bytes/str 路径处理不一致，导致 TypeError）
+                logger.info(f"正在读取 {page_count} 张图片...")
+                image_data = []
+                for i, p in enumerate(image_files):
+                    image_data.append(p.read_bytes())
+                    if (i + 1) % 50 == 0 or (i + 1) == page_count:
+                        logger.info(f"已读取 {i + 1}/{page_count} 张图片")
 
-                        # 原子写入：先写临时文件再替换，防止写入中断损坏原始图片
-                        tmp_path = p.with_suffix('.dpi_tmp' + p.suffix)
-                        try:
-                            img.save(tmp_path, format=fmt, **save_kwargs)
-                            tmp_path.replace(p)
-                        except (OSError, ValueError) as e:
-                            self._debug(f"DPI 设置失败 {p.name}: {e}，保留原图")
-                            if tmp_path.exists():
-                                tmp_path.unlink()
+                # 使用 layout_fun 在 PDF 层面控制页面尺寸（基于 DPI 换算）
+                # img2pdf 原生机制，无需对图片做任何重编码
+                dpi = self.pdf_resolution
+                a4_width_pt, a4_height_pt = 595.276, 841.890  # A4 纸张点数
+                layout_fun = img2pdf.get_layout_fun(
+                    (a4_width_pt / dpi * 72, a4_height_pt / dpi * 72),
+                    None, None, None, None
+                )
 
-                # img2pdf 原生支持文件路径列表，内部以流式读取，内存占用极低
-                # 使用 outputstream 参数直接写入文件，避免中间 bytes 对象
+                logger.info("正在生成 PDF 文档...")
                 with open(pdf_path, "wb") as f:
-                    img2pdf.convert(
-                        [str(p) for p in image_files],
-                        outputstream=f
-                    )
-                logger.info(f"PDF 生成成功: {pdf_path.name} (DPI: {dpi})")
+                    img2pdf.convert(image_data, outputstream=f, layout_fun=layout_fun)
+
+                size_mb = pdf_path.stat().st_size / (1024 * 1024)
+                logger.info(f"PDF 生成成功: {pdf_path.name} ({size_mb:.1f} MB, {page_count} 页)")
             except Exception as e:
                 logger.error(f"img2pdf 转换失败: {e}")
                 raise
 
-        await loop.run_in_executor(None, _build_pdf_stream)
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(None, _do_convert),
+                timeout=pdf_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"PDF 转换超时 ({pdf_timeout}s)，图片数量: {page_count}")
+            if pdf_path.exists():
+                pdf_path.unlink()
+            raise RuntimeError(f"PDF 转换超时（{pdf_timeout}秒），请减少图片数量或稍后重试")
+
         return pdf_path
 
     async def terminate(self):
