@@ -14,6 +14,12 @@ import multiprocessing
 import signal
 from urllib.parse import quote
 from aiohttp import web
+import sys
+# 确保插件目录在 sys.path 中（解决 AstrBot 插件加载器不将插件目录加入 path 的问题，
+# 同时保证 multiprocessing.spawn 子进程能找到 _download_worker 模块）
+_plugin_dir = str(Path(__file__).resolve().parent)
+if _plugin_dir not in sys.path:
+    sys.path.insert(0, _plugin_dir)
 from _download_worker import download_album_worker
 
 # 依赖检测标志
