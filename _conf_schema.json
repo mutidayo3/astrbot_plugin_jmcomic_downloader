@@ -76,5 +76,11 @@
     "default": "",
     "description": "ZIP 压缩包密码",
     "hint": "留空则不加密，建议使用强密码"
+  },
+  "debug_log": {
+    "type": "bool",
+    "default": false,
+    "description": "启用调试日志",
+    "hint": "开启后输出详尽的运行日志（缓存命中、下载参数、文件操作等），方便排查问题。正常运行时建议关闭"
   }
 }

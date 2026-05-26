@@ -1,18 +1,20 @@
 from astrbot.api.event import filter as astr_filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
+from astrbot.api import logger, AstrBotConfig
 from astrbot.api.message_components import Plain, File
 from pathlib import Path
 import asyncio
 import os
-import gc
 import shutil
 import time
 import socket
-import zipfile
 import json
-from typing import Optional, Dict, Set
+from typing import Optional, Dict
+import multiprocessing
+import signal
+from urllib.parse import quote
 from aiohttp import web
+from _download_worker import download_album_worker
 
 # 依赖检测标志
 DEPENDENCIES_MET = True
@@ -30,10 +32,11 @@ except ImportError as e:
 class FileServer:
     """轻量级 HTTP 文件服务器，用于跨容器传输文件"""
 
-    def __init__(self, root_dir: Path, host: str = "0.0.0.0", port: int = 18790):
+    def __init__(self, root_dir: Path, host: str = "0.0.0.0", port: int = 18790, debug: bool = False):
         self.root_dir = root_dir.resolve()
         self.host = host
         self.port = port
+        self.debug = debug
         self.app = web.Application()
         self.app.router.add_get("/files/{path:.*}", self._handle)
         self.runner: Optional[web.AppRunner] = None
@@ -42,9 +45,15 @@ class FileServer:
     async def start(self):
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
-        self.site = web.TCPSite(self.runner, self.host, self.port)
-        await self.site.start()
-        logger.info(f"HTTP 文件服务器已启动: http://{self.host}:{self.port}")
+        try:
+            self.site = web.TCPSite(self.runner, self.host, self.port)
+            await self.site.start()
+            logger.info(f"HTTP 文件服务器已启动: http://{self.host}:{self.port}")
+        except OSError as e:
+            logger.error(f"HTTP 文件服务器启动失败 (端口 {self.port}): {e}")
+            await self.runner.cleanup()
+            self.runner = None
+            raise
 
     async def stop(self):
         if self.runner:
@@ -56,23 +65,43 @@ class FileServer:
         rel_path = request.match_info["path"]
         target = (self.root_dir / rel_path).resolve()
 
+        if self.debug:
+            logger.debug(f"[FileServer] 收到请求: {rel_path} -> {target}")
+
         # 安全检查：确保请求路径不超出 root_dir
         try:
             target.relative_to(self.root_dir)
         except ValueError:
+            if self.debug:
+                logger.debug(f"[FileServer] 路径遍历防护拦截: {rel_path}")
             return web.Response(status=403, text="Forbidden")
 
         if not target.exists() or not target.is_file():
+            if self.debug:
+                logger.debug(f"[FileServer] 文件不存在: {target}")
             return web.Response(status=404, text="Not Found")
 
+        if self.debug:
+            size_mb = target.stat().st_size / 1024 / 1024
+            logger.debug(f"[FileServer] 发送文件: {target.name} ({size_mb:.2f} MB)")
+
+        # RFC 5987/6266: 对非 ASCII 文件名使用 filename*= 参数进行编码
+        # Linux 下文件名经常包含中文，直接放在 ASCII header 中会导致 NapCat 下载失败
+        ascii_name = target.name.encode('ascii', errors='ignore').decode('ascii').strip()
+        if not ascii_name or ascii_name != target.name:
+            encoded_name = quote(target.name, safe='')
+            content_disp = f"attachment; filename*=UTF-8''{encoded_name}"
+        else:
+            content_disp = f'attachment; filename="{target.name}"'
+
         return web.FileResponse(target, headers={
-            "Content-Disposition": f'attachment; filename="{target.name}"'
+            "Content-Disposition": content_disp
         })
 
 
-@register("jmcomic_downloader", "mutidayo3", "JMComic 本子下载器", "0.4.0")
+@register("jmcomic_downloader", "mutidayo3", "JMComic 本子下载器", "0.0.24")
 class JMComicPlugin(Star):
-    def __init__(self, context: Context, config: dict = None):
+    def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         self.config = config or {}
         self.download_dir: Optional[Path] = None
@@ -100,20 +129,29 @@ class JMComicPlugin(Star):
         self.enable_zip = self.config.get('enable_zip', False)
         self.zip_password = self.config.get('zip_password', "")
 
+        # 调试日志
+        self.debug_log = self.config.get('debug_log', False)
+        if self.debug_log:
+            logger.info("JMComic 插件调试日志已启用")
+
         # 并发控制
         self._locks: Dict[str, asyncio.Lock] = {}
-        self._served_files: Set[Path] = set()
-        self._dirty_downloads: Set[str] = set()  # 记录因超时而处于“脏”状态的下载任务 ID
+        self._cache_lock = asyncio.Lock()  # 保护 _cache_map 和 cache_index.json 的全局锁
         self._cache_map: Dict[str, str] = {}  # 内存映射: album_id -> pdf_filename
         self._index_file: Path = None  # 持久化索引文件路径
 
+    def _debug(self, msg: str):
+        """输出调试日志（仅在 debug_log 启用时生效）"""
+        if self.debug_log:
+            logger.debug(f"[JMComic] {msg}")
+
     @staticmethod
     def _is_running_in_docker() -> bool:
-        """增强版 Docker 环境检测"""
+        """增强版 Docker 环境检测（兼容 cgroup v1/v2）"""
         # 1. 检查 /.dockerenv 文件 (最可靠)
         if os.path.exists('/.dockerenv'):
             return True
-        # 2. 检查 cgroup 信息
+        # 2. 检查 cgroup v1 信息
         try:
             with open('/proc/1/cgroup', 'r') as f:
                 content = f.read()
@@ -121,7 +159,23 @@ class JMComicPlugin(Star):
                     return True
         except Exception:
             pass
-        # 3. 检查环境变量
+        # 3. 检查 cgroup v2 信息（现代 Docker + systemd）
+        try:
+            with open('/proc/1/mountinfo', 'r') as f:
+                content = f.read()
+                if 'docker' in content or 'kubepods' in content:
+                    return True
+        except Exception:
+            pass
+        # 4. 检查 PID 1 的 cgroup 控制器路径（cgroup v2 格式）
+        try:
+            with open('/proc/self/cgroup', 'r') as f:
+                content = f.read()
+                if 'docker' in content or 'kubepods' in content:
+                    return True
+        except Exception:
+            pass
+        # 5. 检查环境变量
         if os.environ.get('container') == 'docker':
             return True
         return False
@@ -134,6 +188,9 @@ class JMComicPlugin(Star):
         self.download_dir = Path(data_path) / "plugin_data" / self.name / "downloads"
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self._index_file = self.download_dir / "cache_index.json"
+        self._debug(f"数据目录: {data_path}")
+        self._debug(f"下载目录: {self.download_dir}")
+        self._debug(f"索引文件: {self._index_file}")
 
         # 加载持久化的缓存索引
         self._load_cache_index()
@@ -143,10 +200,11 @@ class JMComicPlugin(Star):
         if actual_mode == "auto":
             actual_mode = "docker" if self._is_running_in_docker() else "local"
             logger.info(f"自动检测到运行环境: {actual_mode}")
+        self._debug(f"配置传输模式: {self.transfer_mode} -> 实际模式: {actual_mode}")
 
         # Docker 模式下启动 HTTP 文件服务器
         if actual_mode == "docker":
-            self.file_server = FileServer(self.download_dir, port=self.file_server_port)
+            self.file_server = FileServer(self.download_dir, port=self.file_server_port, debug=self.debug_log)
             await self.file_server.start()
 
             if not self.file_server_base_url:
@@ -169,6 +227,13 @@ class JMComicPlugin(Star):
             if stem.isdigit() and stem not in self._cache_map:
                 self._cache_map[stem] = pdf.name
         
+        self._debug(f"当前配置摘要: workers={self.max_workers}, format={self.image_format}, "
+                    f"timeout={self.download_timeout}s, cleanup={self.auto_cleanup}, "
+                    f"dpi={self.pdf_resolution}, max_pdf_mb={self.max_pdf_size_mb}, "
+                    f"cache_max={self.max_cache_count}, zip={self.enable_zip}, "
+                    f"debug={self.debug_log}")
+        self._debug(f"缓存映射表: {self._cache_map}")
+
         logger.info(f"JMComic 插件初始化完成")
         logger.info(f"下载目录: {self.download_dir}")
         logger.info(f"传输模式: {actual_mode}")
@@ -226,57 +291,72 @@ class JMComicPlugin(Star):
                 with open(self._index_file, 'r', encoding='utf-8') as f:
                     self._cache_map = json.load(f)
                 logger.info(f"已加载缓存索引: {len(self._cache_map)} 条记录")
-            except Exception as e:
+            except OSError as e:
                 logger.warning(f"加载缓存索引失败: {e}")
                 self._cache_map = {}
 
-    def _save_cache_index(self):
-        """将缓存索引保存到磁盘"""
+    async def _save_cache_index(self):
+        """将缓存索引保存到磁盘（需在 _cache_lock 内调用或由调用方保证锁）"""
         if self._index_file:
             try:
                 with open(self._index_file, 'w', encoding='utf-8') as f:
                     json.dump(self._cache_map, f, ensure_ascii=False, indent=2)
-            except Exception as e:
+            except OSError as e:
                 logger.warning(f"保存缓存索引失败: {e}")
 
-    def _check_cache(self, album_id: str) -> Optional[Path]:
-        """检查本地缓存中是否存在指定本子的 PDF"""
+    async def _check_cache(self, album_id: str) -> Optional[Path]:
+        """检查本地缓存中是否存在指定本子的 PDF（线程/协程安全）"""
         if self.max_cache_count <= 0:
+            self._debug(f"缓存已禁用 (max_cache_count=0)")
             return None
-        
-        # 1. 优先查内存映射表
-        if album_id in self._cache_map:
-            filename = self._cache_map[album_id]
-            pdf_path = self.download_dir / filename
-            if pdf_path.exists():
+
+        async with self._cache_lock:
+            # 1. 优先查内存映射表
+            if album_id in self._cache_map:
+                filename = self._cache_map[album_id]
+                pdf_path = self.download_dir / filename
+                if pdf_path.exists():
+                    os.utime(pdf_path, None)
+                    self._debug(f"缓存命中 (内存映射): {album_id} -> {filename}")
+                    return pdf_path
+                else:
+                    self._debug(f"内存映射命中但文件不存在: {album_id} -> {filename}，已清理")
+                    del self._cache_map[album_id]
+
+            # 2. 尝试标准 ID 命名
+            pdf_path = self.download_dir / f"{album_id}.pdf"
+            if pdf_path.exists() and pdf_path.stat().st_size > 0:
+                self._cache_map[album_id] = pdf_path.name
                 os.utime(pdf_path, None)
+                self._debug(f"缓存命中 (磁盘扫描): {album_id} -> {pdf_path.name}")
                 return pdf_path
 
-        # 2. 尝试标准 ID 命名
-        pdf_path = self.download_dir / f"{album_id}.pdf"
-        if pdf_path.exists() and pdf_path.stat().st_size > 0:
-            self._cache_map[album_id] = pdf_path.name
-            os.utime(pdf_path, None)
-            return pdf_path
-            
-        return None
+            self._debug(f"缓存未命中: {album_id}")
+            return None
 
-    def _cleanup_cache(self, keep_path: Optional[Path] = None):
-        """按 LRU 策略淘汰旧缓存，保留 keep_path"""
+    async def _cleanup_cache(self, keep_path: Optional[Path] = None):
+        """按 LRU 策略淘汰旧缓存，保留 keep_path（线程/协程安全）"""
         if self.max_cache_count <= 0:
             return
 
-        cached = self._list_cached_pdfs()
-        # 过滤掉需要保留的文件
-        to_check = [p for p in cached if keep_path is None or p.resolve() != keep_path.resolve()]
+        async with self._cache_lock:
+            cached = self._list_cached_pdfs()
+            self._debug(f"缓存淘汰检查: 当前 {len(cached)} 个 PDF, 上限 {self.max_cache_count}")
+            # 过滤掉需要保留的文件
+            to_check = [p for p in cached if keep_path is None or p.resolve() != keep_path.resolve()]
+            evicted = 0
 
-        while len(to_check) >= self.max_cache_count:
-            oldest = to_check.pop()  # 列表按 atime 降序，最后一个是最旧的
-            try:
-                oldest.unlink()
-                logger.info(f"缓存淘汰: 删除旧 PDF {oldest.name}")
-            except Exception as e:
-                logger.warning(f"缓存淘汰失败 {oldest.name}: {e}")
+            while len(to_check) >= self.max_cache_count:
+                oldest = to_check.pop()  # 列表按 atime 降序，最后一个是最旧的
+                try:
+                    oldest.unlink()
+                    evicted += 1
+                    logger.info(f"缓存淘汰: 删除旧 PDF {oldest.name}")
+                except OSError as e:
+                    logger.warning(f"缓存淘汰失败 {oldest.name}: {e}")
+
+            if evicted:
+                self._debug(f"缓存淘汰完成: 删除 {evicted} 个, 剩余 {len(cached) - evicted} 个")
 
     @astr_filter.command("jmcomic")
     async def download_jmcomic(self, event: AstrMessageEvent, album_id: str = None):
@@ -303,6 +383,7 @@ class JMComicPlugin(Star):
             return
 
         lock = self._get_album_lock(album_id)
+        self._debug(f"获取本子锁: {album_id} (当前锁数量: {len(self._locks)})")
         
         # 优化：直接尝试获取锁，避免 locked() 检查与 acquire 之间的竞态条件
         # 如果锁已被占用，协程会在此处自动挂起等待
@@ -311,10 +392,11 @@ class JMComicPlugin(Star):
             pdf_path: Optional[Path] = None
             start_time = time.time()
             from_cache = False
+            self._debug(f"锁已获取，开始处理本子 {album_id}")
 
             try:
-                # 1. 检查本地缓存
-                cached_pdf = self._check_cache(album_id)
+                # 1. 检查本地缓存（_check_cache 内部持有 _cache_lock）
+                cached_pdf = await self._check_cache(album_id)
                 album_title = album_id  # 默认使用 ID
 
                 if cached_pdf:
@@ -340,9 +422,14 @@ class JMComicPlugin(Star):
                             expected_name = f"{album_title}.pdf"
                             if pdf_path.name != expected_name:
                                 new_pdf_path = pdf_path.parent / expected_name
-                                pdf_path.rename(new_pdf_path)
-                                pdf_path = new_pdf_path
-                                logger.info(f"缓存文件已重命名为: {pdf_path.name}")
+                                try:
+                                    if new_pdf_path.exists():
+                                        new_pdf_path.unlink()
+                                    pdf_path.rename(new_pdf_path)
+                                    pdf_path = new_pdf_path
+                                    logger.info(f"缓存文件已重命名为: {pdf_path.name}")
+                                except OSError as e:
+                                    logger.warning(f"缓存文件重命名失败: {e}，保留原文件名")
                     except Exception as e:
                         logger.warning(f"获取缓存本子标题失败，将使用 ID 作为文件名: {e}")
                 else:
@@ -351,22 +438,24 @@ class JMComicPlugin(Star):
                     
                     album_dir = self.download_dir / album_id
                                     
-                    # 检查是否存在因上次超时而留下的“脏”目录
-                    if album_id in self._dirty_downloads and album_dir.exists():
-                        logger.warning(f"检测到未完成的脏目录，正在清理: {album_dir}")
-                        try:
-                            shutil.rmtree(album_dir, ignore_errors=True)
-                        except Exception:
-                            pass
-                        self._dirty_downloads.discard(album_id)
-                    
+                    # 检查是否存在上次残留的不完整目录（进程崩溃等极端情况）
+                    if album_dir.exists():
+                        logger.warning(f"检测到残留目录，正在清理: {album_dir}")
+                        shutil.rmtree(album_dir, ignore_errors=True)
+                                        
                     album_dir.mkdir(parents=True, exist_ok=True)
 
                     # 获取本子标题
+                    t0 = time.time()
                     album_title = await self._download_album(album_id, album_dir)
+                    self._debug(f"下载耗时: {time.time() - t0:.1f}s, 标题: {album_title}")
 
                     # 3. 检查图片
                     image_files = self._collect_image_files(album_dir)
+                    self._debug(f"找到图片: {len(image_files)} 张")
+                    if self.debug_log and image_files:
+                        total_size = sum(f.stat().st_size for f in image_files) / 1024 / 1024
+                        self._debug(f"图片总大小: {total_size:.2f} MB, 首张: {image_files[0].name}, 末张: {image_files[-1].name}")
                     if not image_files:
                         yield event.plain_result("❌ 下载完成后未找到图片文件")
                         return
@@ -376,7 +465,9 @@ class JMComicPlugin(Star):
                     )
 
                     # 4. 转 PDF
+                    t0 = time.time()
                     pdf_path = await self._convert_to_pdf(image_files, album_id)
+                    self._debug(f"PDF 转换耗时: {time.time() - t0:.1f}s")
 
                     if not pdf_path or not pdf_path.exists():
                         yield event.plain_result("❌ PDF 转换失败")
@@ -390,8 +481,13 @@ class JMComicPlugin(Star):
                     expected_pdf_name = f"{album_title}.pdf"
                     if pdf_path.name != expected_pdf_name:
                         new_pdf_path = pdf_path.parent / expected_pdf_name
-                        pdf_path.rename(new_pdf_path)
-                        pdf_path = new_pdf_path
+                        try:
+                            if new_pdf_path.exists():
+                                new_pdf_path.unlink()
+                            pdf_path.rename(new_pdf_path)
+                            pdf_path = new_pdf_path
+                        except OSError as e:
+                            logger.warning(f"PDF 重命名失败: {e}，保留原文件名")
 
                     logger.info(f"PDF 生成成功: {pdf_path.name} ({file_size_mb:.2f} MB)")
 
@@ -408,26 +504,35 @@ class JMComicPlugin(Star):
 
                 if pdf_path.resolve() != final_pdf_path.resolve():
                     # 如果文件名不一致，执行重命名
-                    if final_pdf_path.exists():
-                        final_pdf_path.unlink()
-                    pdf_path.rename(final_pdf_path)
-                    # 更新内存映射并持久化
-                    self._cache_map[album_id] = expected_name
-                    self._save_cache_index()
-                    pdf_path = final_pdf_path
+                    try:
+                        if final_pdf_path.exists():
+                            final_pdf_path.unlink()
+                        pdf_path.rename(final_pdf_path)
+                        pdf_path = final_pdf_path
+                    except OSError as e:
+                        logger.warning(f"PDF 最终重命名失败: {e}，使用当前文件名")
+                        expected_name = pdf_path.name
+                    # 更新内存映射并持久化（_cache_lock 保证并发安全）
+                    async with self._cache_lock:
+                        self._cache_map[album_id] = expected_name
+                        await self._save_cache_index()
                 else:
-                    self._cache_map[album_id] = pdf_path.name
-                    # 即使没改名，也确保索引是最新的（以防手动改过文件名）
-                    self._save_cache_index()
+                    async with self._cache_lock:
+                        self._cache_map[album_id] = pdf_path.name
+                        # 即使没改名，也确保索引是最新的（以防手动改过文件名）
+                        await self._save_cache_index()
 
                 final_file_path = pdf_path
                 final_file_name = expected_name
                 
                 if self.enable_zip:
+                    t0 = time.time()
                     zip_path = await self._compress_to_zip(pdf_path, album_title, self.zip_password)
+                    self._debug(f"ZIP 压缩耗时: {time.time() - t0:.1f}s")
                     if zip_path:
                         final_file_path = zip_path
                         final_file_name = f"{album_title}.zip"
+                        self._debug(f"ZIP 文件大小: {zip_path.stat().st_size / 1024 / 1024:.2f} MB")
 
                 # 7. 发送文件（根据配置选择传输方式）
                 # 注意：文件发送涉及底层 API 调用，此处使用 event.send 确保及时性
@@ -439,7 +544,17 @@ class JMComicPlugin(Star):
                     yield event.plain_result(f"📚 本子 {album_id} 处理完成，正在发送文件...")
 
                 # 执行文件发送
+                self._debug(f"准备发送文件: {final_file_name} ({final_file_path})")
                 await self._send_file(event, final_file_path, final_file_name, album_id)
+                self._debug(f"文件发送完成")
+
+                # 清理发送后残留的 ZIP 临时文件（PDF 保留为缓存）
+                if self.enable_zip and final_file_path.suffix.lower() == '.zip':
+                    try:
+                        final_file_path.unlink()
+                        logger.info(f"已清理临时 ZIP: {final_file_path.name}")
+                    except OSError as e:
+                        logger.warning(f"清理 ZIP 失败: {e}")
 
                 # 如果设置了密码，通过 yield 返回密码提示，确保在文件发送后显示
                 if self.enable_zip and self.zip_password:
@@ -447,40 +562,39 @@ class JMComicPlugin(Star):
 
                 elapsed = time.time() - start_time
                 logger.info(f"本子 {album_id} 总耗时: {elapsed:.1f}s (缓存: {from_cache})")
+                self._debug(f"完成明细: 缓存={from_cache}, 文件={final_file_name}, "
+                           f"锁数量={len(self._locks)}")
 
             except asyncio.TimeoutError:
-                logger.error(f"下载本子 {album_id} 超时")
-                # 标记为脏状态，防止后续重试时发生目录竞争
-                self._dirty_downloads.add(album_id)
-                yield event.plain_result("❌ 下载超时，请稍后重试。后台下载已终止，但临时文件可能需要稍后清理。")
-                return  # 直接返回，不执行 finally 中的清理逻辑，留给下次请求处理
+                logger.error(f"下载本子 {album_id} 超时（子进程已终止）")
+                yield event.plain_result(f"❌ 下载超时（{self.download_timeout}s），请稍后重试。")
+                return
             except Exception as e:
                 logger.error(f"下载本子 {album_id} 时出错: {e}", exc_info=True)
                 yield event.plain_result(f"❌ 下载失败: {str(e)}")
             finally:
                 # 清理临时图片目录
-                # 只有在非超时且非脏状态下才立即清理
-                if self.auto_cleanup and album_dir and album_dir.exists() and album_id not in self._dirty_downloads:
+                if self.auto_cleanup and album_dir and album_dir.exists():
                     try:
                         shutil.rmtree(album_dir, ignore_errors=True)
                         logger.info(f"已清理临时目录: {album_dir}")
                     except Exception as e:
                         logger.warning(f"清理目录失败: {e}")
 
-                # 缓存淘汰（保留当前这本）
+                # 缓存淘汰（保留当前这本，内部持有 _cache_lock）
                 if pdf_path:
-                    self._cleanup_cache(keep_path=pdf_path)
+                    await self._cleanup_cache(keep_path=pdf_path)
 
-                # 内存优化说明：
-                # 不再手动清理 _locks 中的条目。对于离散的本子 ID，保留 Lock 对象
-                # 可以避免复杂的竞态条件检查，且内存开销极小（每个 Lock 约几十字节）。
-                # 同时移除了手动 gc.collect()，依赖 Python 自动引用计数回收内存，避免阻塞事件循环。
+                # 释放不再被使用的锁对象，防止字典随唯一 album_id 无限增长
+                if not lock.locked():
+                    self._locks.pop(album_id, None)
 
     async def _send_file(self, event: AstrMessageEvent, file_path: Path, file_name: str, album_id: str):
         """根据配置选择文件传输方式（内部使用 event.send 绕过框架限制）"""
         mode = self.transfer_mode
         if mode == "auto":
             mode = "docker" if self._is_running_in_docker() else "local"
+        self._debug(f"发送模式解析: 配置={self.transfer_mode} -> 实际={mode}, 文件={file_name}, 路径={file_path}")
 
         if mode == "local":
             # 本地模式：直接使用 File 组件
@@ -503,7 +617,8 @@ class JMComicPlugin(Star):
 
         # 获取 aiocqhttp 的 bot 客户端
         from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-        assert isinstance(event, AiocqhttpMessageEvent)
+        if not isinstance(event, AiocqhttpMessageEvent):
+            raise TypeError(f"Expected AiocqhttpMessageEvent, got {type(event).__name__}")
         bot = event.bot
 
         # 判断是群聊还是私聊
@@ -512,6 +627,11 @@ class JMComicPlugin(Star):
 
         # 构建文件 URL（NapCat 会通过 HTTP 下载）
         file_url = f"{self.file_server_base_url}/files/{file_path.name}"
+        self._debug(f"OneBot 发送参数: is_group={is_group}, file_url={file_url}, name={file_name}")
+        if is_group:
+            self._debug(f"目标群: {message_obj.group_id}")
+        else:
+            self._debug(f"目标用户: {message_obj.sender.user_id}")
 
         try:
             if is_group:
@@ -556,57 +676,91 @@ class JMComicPlugin(Star):
         return sorted(image_files, key=sort_key)
 
     async def _download_album(self, album_id: str, download_dir: Path) -> str:
-        """异步下载本子并返回标题"""
-        loop = asyncio.get_event_loop()
-        album_title = album_id  # 默认使用 ID 作为标题
+        """异步下载本子并返回标题。
 
-        def _download():
-            nonlocal album_title
-            option = jmcomic.JmOption.default()
+        使用 multiprocessing.Process + Pipe 在独立子进程中运行 jmcomic.download_album，
+        超时后可通过 process.terminate() 真正杀死进程、释放带宽和 CPU。
+        使用 Pipe 替代 Queue 避免 join_thread() 阻塞事件循环。
+        """
+        album_title = album_id
+        self._debug(f"下载参数: id={album_id}, dir={download_dir}, format={self.image_format}, "
+                    f"workers={self.max_workers}, timeout={self.download_timeout}s")
 
-            suffix_map = {
-                'webp': '.webp', 'jpg': '.jpg',
-                'jpeg': '.jpg', 'png': '.png'
-            }
-            option.download.image.suffix = suffix_map.get(self.image_format, '.webp')
-            option.dir_rule.rule = 'Aid'
-            option.dir_rule.base_dir = str(download_dir)
-            option.download.threading.image = self.max_workers
+        loop = asyncio.get_running_loop()
+        ctx = multiprocessing.get_context('spawn')
+        parent_conn, child_conn = ctx.Pipe(duplex=False)
 
-            logger.info(f"开始下载 {album_id} | 线程: {self.max_workers}")
-            
-            # 执行下载并获取本子对象
-            result = jmcomic.download_album(album_id, option)
-            
-            # 兼容不同版本的 jmcomic 返回值：可能是 JmAlbumDetail 对象，也可能是 (JmAlbumDetail, ...) 元组
-            if isinstance(result, tuple):
-                album = result[0]
-            else:
-                album = result
-
-            if album:
-                album_title = album.title
-                # 清理标题中的非法字符，防止文件系统报错
-                invalid_chars = '<>:"/\\|?*'
-                for char in invalid_chars:
-                    album_title = album_title.replace(char, '')
-                album_title = album_title.strip()
-
-            file_count = sum(1 for _ in download_dir.rglob('*') if _.is_file())
-            logger.info(f"下载完成: {album_title} (共 {file_count} 个文件)")
-
-        await asyncio.wait_for(
-            loop.run_in_executor(None, _download),
-            timeout=self.download_timeout
+        process = ctx.Process(
+            target=download_album_worker,
+            args=(album_id, str(download_dir), self.image_format, self.max_workers, child_conn),
+            daemon=True
         )
+        process.start()
+        child_conn.close()  # 父进程不使用子端连接
+        self._debug(f"下载子进程已启动: PID={process.pid}")
+
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(None, process.join),
+                timeout=self.download_timeout
+            )
+
+            # 从 Pipe 读取结果（进程已结束，数据在缓冲区中，非阻塞）
+            if parent_conn.poll():
+                status, value = parent_conn.recv()
+                if status == 'ok':
+                    album_title = value
+                else:
+                    raise RuntimeError(f"下载失败: {value}")
+            else:
+                # 子进程未发送任何数据即退出，根据 exitcode 提供诊断信息
+                ec = process.exitcode
+                if ec is not None and ec < 0:
+                    sig_name = signal.Signals(-ec).name if hasattr(signal, 'Signals') else f'signal {-ec}'
+                    detail = f"子进程被信号杀死 ({sig_name}, exitcode={ec})"
+                    if -ec == getattr(signal, 'SIGKILL', 9):
+                        detail += "，可能是 OOM Killer 介入，请检查系统内存"
+                elif ec == 0:
+                    detail = f"子进程正常退出但未返回结果 (exitcode={ec})，可能是 jmcomic 库内部异常"
+                else:
+                    detail = f"子进程异常退出 (exitcode={ec})，可能是未捕获的异常或崩溃"
+                raise RuntimeError(detail)
+
+        except asyncio.TimeoutError:
+            logger.error(f"下载子进程超时，正在终止: PID={process.pid}")
+            process.terminate()
+            try:
+                process.join(timeout=5)
+                if process.is_alive():
+                    logger.warning(f"子进程 {process.pid} 未响应 SIGTERM，强制杀死")
+                    process.kill()
+                    process.join(timeout=3)
+            except OSError:
+                pass
+
+            if download_dir.exists():
+                shutil.rmtree(download_dir, ignore_errors=True)
+                logger.info(f"已清理超时的不完整下载: {download_dir}")
+            raise
+
+        finally:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=3)
+            parent_conn.close()
+            self._debug(f"下载子进程已结束: PID={process.pid}, exitcode={process.exitcode}")
+
+        file_count = sum(1 for _ in download_dir.rglob('*') if _.is_file())
+        logger.info(f"下载完成: {album_title} (共 {file_count} 个文件)")
         return album_title
 
     async def _compress_to_zip(self, pdf_path: Path, album_title: str, password: str = "") -> Optional[Path]:
         """将 PDF 压缩为 ZIP 文件（支持 AES-256 加密，仅存储模式以节省 CPU）"""
         zip_path = self.download_dir / f"{album_title}.zip"
         logger.info(f"正在打包 PDF (Store 模式): {pdf_path.name} -> {zip_path.name}")
+        self._debug(f"ZIP 参数: 源={pdf_path.name}, 输出={zip_path.name}, 加密={'AES-256' if password else '无'}")
         
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         def _do_compress():
             try:
                 # 使用 pyzipper 实现真正的加密写入
@@ -632,37 +786,56 @@ class JMComicPlugin(Star):
         """使用 img2pdf 将图片转换为 PDF（流式处理，低内存占用）"""
         pdf_path = self.download_dir / f"{album_id}.pdf"
         logger.info(f"开始生成 PDF (img2pdf): {len(image_files)} 页 -> {pdf_path}")
+        self._debug(f"PDF 转换参数: {len(image_files)} 页, DPI={self.pdf_resolution}, 输出={pdf_path}")
 
-        loop = asyncio.get_event_loop()
+        dpi = self.pdf_resolution
+        loop = asyncio.get_running_loop()
 
         def _build_pdf_stream():
-            # img2pdf 支持直接传入文件路径列表，它会在内部以流式方式读取和转换
-            # 这种方式比手动 open/close 更简洁且能有效管理资源
             try:
+                from PIL import Image
+                for p in image_files:
+                    with Image.open(p) as img:
+                        fmt = img.format
+                        if fmt is None:
+                            self._debug(f"跳过 DPI 设置（无法识别格式）: {p.name}")
+                            continue
+
+                        save_kwargs = {'dpi': (dpi, dpi)}
+                        if fmt == 'JPEG':
+                            save_kwargs['quality'] = 100
+                            save_kwargs['subsampling'] = 'keep'
+                        elif fmt == 'WEBP':
+                            save_kwargs['quality'] = 100
+                            save_kwargs['lossless'] = True
+                        elif fmt == 'PNG':
+                            save_kwargs['compress_level'] = 1
+                        # GIF/BMP 等：仅设置 DPI，不做质量参数
+
+                        # 原子写入：先写临时文件再替换，防止写入中断损坏原始图片
+                        tmp_path = p.with_suffix('.dpi_tmp' + p.suffix)
+                        try:
+                            img.save(tmp_path, format=fmt, **save_kwargs)
+                            tmp_path.replace(p)
+                        except (OSError, ValueError) as e:
+                            self._debug(f"DPI 设置失败 {p.name}: {e}，保留原图")
+                            if tmp_path.exists():
+                                tmp_path.unlink()
+
+                # img2pdf 原生支持文件路径列表，内部以流式读取，内存占用极低
+                # 使用 outputstream 参数直接写入文件，避免中间 bytes 对象
                 with open(pdf_path, "wb") as f:
-                    # dpi 设置：虽然 img2pdf 主要是封装，但可以通过 convert 选项处理一些兼容性
-                    # fit_into 可以用于缩放，这里我们保持原图尺寸以确保清晰度
-                    f.write(img2pdf.convert(
+                    img2pdf.convert(
                         [str(p) for p in image_files],
-                        layout_fun=img2pdf.get_layout_fun(None, None, None, None, None)
-                    ))
-                logger.info(f"PDF 生成成功: {pdf_path.name}")
+                        outputstream=f
+                    )
+                logger.info(f"PDF 生成成功: {pdf_path.name} (DPI: {dpi})")
             except Exception as e:
                 logger.error(f"img2pdf 转换失败: {e}")
                 raise
 
         await loop.run_in_executor(None, _build_pdf_stream)
         return pdf_path
-
-    async def _cleanup_files(self, album_dir: Optional[Path], pdf_path: Optional[Path]):
-        """清理临时文件（保留 PDF 缓存）"""
-        if album_dir and album_dir.exists():
-            try:
-                shutil.rmtree(album_dir, ignore_errors=True)
-                logger.info(f"已清理目录: {album_dir}")
-            except Exception as e:
-                logger.warning(f"清理目录失败: {e}")
-
 
     async def terminate(self):
         """插件卸载"""

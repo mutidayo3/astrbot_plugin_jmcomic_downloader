@@ -31,6 +31,7 @@ AstrBot 插件，支持通过本子 ID 从 JMComic 下载并自动转换为 PDF 
 | `file_server_base_url` | 字符串 | `""` | Docker 模式下文件服务器的外网访问地址，如 `http://172.17.0.1:18790` |
 | `enable_zip` | 布尔 | `false` | 是否将 PDF 压缩为 ZIP 格式发送（可减小体积并支持加密） |
 | `zip_password` | 字符串 | `""` | ZIP 压缩包密码，留空则不加密（建议使用强密码） |
+| `debug_log` | 布尔 | `false` | 启用调试日志，输出详尽运行信息（缓存命中、下载参数、文件操作等），方便排查问题 |
 
 ### 传输模式详解
 
@@ -180,6 +181,10 @@ hostname -I
 
 | 版本 | 更新内容 |
 |------|----------|
+| 0.0.24 | **边界容错与诊断增强**：<br>- 子进程增加 `SIGTERM` 信号处理，超时时尽力发送诊断信息而非静默退出<br>- 父进程根据 `exitcode` 提供精准诊断：区分信号杀死（含 OOM Killer 提示）、正常退出未返回、异常崩溃<br>- 移除 `img2pdf.convert` 冗余的 `layout_fun` 参数（与默认行为等价） |
+| 0.0.23 | **架构与健壮性深度修复**：<br>- 将下载 worker 拆分到独立模块 `_download_worker.py`，解决 `multiprocessing.spawn` 重新导入主模块导致插件重复注册的隐患<br>- 修复原地修改图片的副作用：处理 `format=None`、GIF/WebP 质量损失、磁盘写入中断损坏原图等问题（原子写入 + 格式感知质量参数）<br>- 用 `Pipe` 替代 `Queue` 进行进程间通信，消除 `join_thread()` 阻塞事件循环的风险<br>- 缓存锁字典不再只增不减，`finally` 中释放不再使用的锁对象<br>- 收窄裸 `except Exception` 为 `OSError`（文件 IO 操作），避免吞掉 `KeyboardInterrupt`/`SystemExit`<br>- `asyncio.get_event_loop()` 替换为 `asyncio.get_running_loop()`（Python 3.10+ 弃用警告）<br>- `assert` 运行时类型检查替换为显式 `isinstance + raise`<br>- `img2pdf.convert` 使用 `outputstream` 参数直写文件，避免中间 bytes 对象 |
+| 0.0.22 | 新增 `debug_log` 配置项，开启后输出详尽的调试日志（缓存命中、下载参数、文件操作、耗时统计等），方便排查问题 |
+| 0.0.21 | **代码质量与健壮性优化**：<br>- 修复 `@register` 版本号与 `metadata.yaml` 不一致的问题<br>- 使用 `AstrBotConfig` 替代 `dict` 类型声明，支持 `save_config()` 等完整功能<br>- 让 `pdf_resolution` 配置真正生效：通过 PIL 为图片添加 DPI 元数据，使 img2pdf 正确识别分辨率<br>- 修复缓存命中时文件重命名的竞态风险（`FileExistsError` 防护）<br>- 自动清理发送后的 ZIP 临时文件，避免磁盘泄漏（PDF 保留为缓存）<br>- 移除未使用的导入 (`gc`, `zipfile`, `PIL.Image`)、成员变量 (`_served_files`) 和方法 (`_cleanup_files`) |
 | 0.0.20 | **性能与稳定性深度优化**：<br>- 引入 `pyzipper` 实现真正的 AES-256 ZIP 加密，修复标准库无法加密写入的安全漏洞<br>- 优化缓存机制：采用持久化索引 (`cache_index.json`) 和标题命名，重启后依然精准命中且磁盘零冗余<br>- 增强依赖检测：插件启动时自动校验核心库，缺失时提供友好的安装指引而非崩溃报错<br>- 移除手动 GC 调用与不安全的锁清理逻辑，显著提升异步环境下的运行效率与稳定性<br>- 配置文件规范化：使用 `options` 替代 `enum`，并拆分 `description` 与 `hint` 提升 WebUI 体验 |
 | 0.0.19 | 增加 ZIP 压缩发送功能，支持密码保护；优化 PDF 生成逻辑，使用 `img2pdf` 进行流式处理以降低内存占用 |
 | 0.0.18 | 优化并发锁实现，修复竞态条件；完善 Docker 网络检测，支持自动推断宿主机 IP |
