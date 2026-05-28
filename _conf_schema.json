@@ -82,5 +82,13 @@
     "default": false,
     "description": "启用调试日志",
     "hint": "开启后输出详尽的运行日志（缓存命中、下载参数、文件操作等），方便排查问题。正常运行时建议关闭"
+  },
+  "max_concurrent": {
+    "type": "int",
+    "default": 1,
+    "minimum": 1,
+    "maximum": 4,
+    "description": "同时下载的最大并发数",
+    "hint": "限制同时处理的下载请求数量，防止资源耗尽。设为 1 时严格按请求顺序处理，大于 1 时允许并发但仍按顺序放行"
   }
 }

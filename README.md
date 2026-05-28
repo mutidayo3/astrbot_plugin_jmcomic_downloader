@@ -32,6 +32,7 @@ AstrBot 插件，支持通过本子 ID 从 JMComic 下载并自动转换为 PDF 
 | `enable_zip` | 布尔 | `false` | 是否将 PDF 压缩为 ZIP 格式发送（可减小体积并支持加密） |
 | `zip_password` | 字符串 | `""` | ZIP 压缩包密码，留空则不加密（建议使用强密码） |
 | `debug_log` | 布尔 | `false` | 启用调试日志，输出详尽运行信息（缓存命中、下载参数、文件操作等），方便排查问题 |
+| `max_concurrent` | 整数 | `1` | 同时下载的最大并发数（1~4），设为 1 时严格按请求顺序处理 |
 
 ### 传输模式详解
 
@@ -154,7 +155,7 @@ hostname -I
 ## 缓存机制
 
 - **缓存位置**：`AstrBot/data/plugin_data/jmcomic_downloader/downloads/`
-- **命名规则**：优先使用 `{本子标题}.pdf`，确保文件名友好易读
+- **命名规则**：优先使用 `JM{本子ID}-{本子标题}.pdf`，确保文件名包含 ID 便于检索
 - **持久化索引**：内置 `cache_index.json`，重启后依然能精准命中缓存
 - **淘汰策略**：LRU（最近最少使用），按文件访问时间排序
 - **命中效果**：跳过下载和 PDF 转换，直接发送，秒级响应
@@ -181,6 +182,8 @@ hostname -I
 
 | 版本 | 更新内容 |
 |------|----------|
+| 0.0.27 | **多并发资源优化与请求顺序保证**：<br>- 新增 `_FIFOSemaphore` 类，实现严格按请求先后顺序放行的有序信号量，避免标准 `Semaphore` 的无序唤醒问题<br>- 新增 `max_concurrent` 配置项（默认 1），限制全局并发下载数，防止多请求同时启动子进程导致资源耗尽<br>- FIFO 信号量包裹整个下载→转换→发送流程，确保文件按请求顺序发送 |
+| 0.0.26 | **文件命名规范优化**：<br>- PDF/ZIP 文件名统一为 `JM{本子ID}-{本子标题}.{pdf,zip}` 格式，便于识别和检索 |
 | 0.0.25 | **PDF 转换性能与稳定性修复**：<br>- 彻底移除灾难性慢速的 DPI 重编码循环（WebP lossless 重编码 10–30s/张，260张 = 43–130 分钟）<br>- 改用 `img2pdf.get_layout_fun()` 在 PDF 层面控制页面尺寸，零额外 I/O<br>- 直接读取图片二进制内容传给 img2pdf，彻底解决路径类型兼容导致的 `TypeError`<br>- 添加 10 分钟超时保护，防止 PDF 转换无限挂起<br>- 添加进度日志，用户可观察转换状态 |  
 | 0.0.24 | **边界容错与诊断增强**：<br>- 子进程增加 `SIGTERM` 信号处理，超时时尽力发送诊断信息而非静默退出<br>- 父进程根据 `exitcode` 提供精准诊断：区分信号杀死（含 OOM Killer 提示）、正常退出未返回、异常崩溃<br>- 移除 `img2pdf.convert` 冗余的 `layout_fun` 参数（与默认行为等价） |
 | 0.0.23 | **架构与健壮性深度修复**：<br>- 将下载 worker 拆分到独立模块 `_download_worker.py`，解决 `multiprocessing.spawn` 重新导入主模块导致插件重复注册的隐患<br>- 修复原地修改图片的副作用：处理 `format=None`、GIF/WebP 质量损失、磁盘写入中断损坏原图等问题（原子写入 + 格式感知质量参数）<br>- 用 `Pipe` 替代 `Queue` 进行进程间通信，消除 `join_thread()` 阻塞事件循环的风险<br>- 缓存锁字典不再只增不减，`finally` 中释放不再使用的锁对象<br>- 收窄裸 `except Exception` 为 `OSError`（文件 IO 操作），避免吞掉 `KeyboardInterrupt`/`SystemExit`<br>- `asyncio.get_event_loop()` 替换为 `asyncio.get_running_loop()`（Python 3.10+ 弃用警告）<br>- `assert` 运行时类型检查替换为显式 `isinstance + raise`<br>- `img2pdf.convert` 使用 `outputstream` 参数直写文件，避免中间 bytes 对象 |
