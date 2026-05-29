@@ -248,6 +248,7 @@ class JMComicPlugin(Star):
 
         # ---- 图片数量检查：防止超大本子耗尽资源 ----
         if self.max_image_count > 0:
+            yield event.plain_result(f"🔍 正在查询本子 {album_id} 信息...")
             try:
                 client = jmcomic.JmOption.default().new_jm_client()
                 album = client.get_album_detail(album_id)
@@ -271,6 +272,10 @@ class JMComicPlugin(Star):
                 yield event.plain_result(
                     f"⏳ 本子 {album_id} 的请求已加入处理队列，"
                     f"前面还有 {queued_count} 个任务，请耐心等待..."
+                )
+            else:
+                yield event.plain_result(
+                    f"✅ 已接收本子 {album_id} 的请求，正在处理..."
                 )
 
             async with self._fifo:
