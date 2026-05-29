@@ -13,9 +13,15 @@
 import asyncio
 import re
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Optional, Dict
+
+# 确保插件目录在 sys.path 中，支持绝对导入同目录模块
+_plugin_dir = str(Path(__file__).resolve().parent)
+if _plugin_dir not in sys.path:
+    sys.path.insert(0, _plugin_dir)
 
 from astrbot.api.event import filter as astr_filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
