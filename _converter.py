@@ -1,6 +1,6 @@
 """文件转换工具：图片→PDF 转换 + PDF→ZIP 压缩。
 
-PDF 转换使用 img2pdf 流式处理，支持 DPI 控制、JPEG 重压缩及超时保护。
+PDF 转换使用 img2pdf 流式处理，支持 DPI 控制及超时保护。
 ZIP 压缩使用 pyzipper 实现 AES-256 强加密。
 """
 
@@ -16,14 +16,11 @@ async def convert_to_pdf(
     pdf_path: Path,
     pdf_resolution: float = 150.0,
     pdf_timeout: int = 600,
-    image_quality: int = 85,
-    max_image_pixels: int = 0,
 ) -> Path:
     """使用 img2pdf 将图片列表转换为单个 PDF 文件。
 
     特性：
-    - 可选的 JPEG 有损重压缩（image_quality < 100 时启用），大幅减小 PDF 体积
-    - 可选的长边尺寸限制（max_image_pixels > 0 时等比缩小）
+    - 直接读取图片二进制内容传给 img2pdf，规避路径类型兼容问题
     - 使用 layout_fun 在 PDF 层面控制页面尺寸，基于 DPI 换算
     - 超时保护，防止转换无限挂起
 
@@ -32,8 +29,6 @@ async def convert_to_pdf(
         pdf_path: 输出 PDF 路径
         pdf_resolution: 目标 DPI（影响清晰度与文件大小）
         pdf_timeout: 超时时间（秒）
-        image_quality: JPEG 压缩质量 (10-100)，100 为无损嵌入原图
-        max_image_pixels: 图片长边最大像素，0 表示不限制
 
     Returns:
         生成的 PDF 文件路径
@@ -41,70 +36,22 @@ async def convert_to_pdf(
     Raises:
         RuntimeError: 转换超时或失败
     """
-    logger.info(
-        f"开始生成 PDF (img2pdf): {len(image_files)} 页 -> {pdf_path}"
-        f"{' (压缩: q=' + str(image_quality) + ', max_px=' + str(max_image_pixels) + ')' if image_quality < 100 or max_image_pixels > 0 else ''}"
-    )
+    logger.info(f"开始生成 PDF (img2pdf): {len(image_files)} 页 -> {pdf_path}")
 
     loop = asyncio.get_running_loop()
     page_count = len(image_files)
 
     def _do_convert():
         import img2pdf
-        from PIL import Image
-        import io
-
-        need_compress = image_quality < 100 or max_image_pixels > 0
 
         # 直接读取图片二进制内容，彻底避免 img2pdf 路径兼容问题
         # （部分版本对 bytes/str 路径处理不一致，导致 TypeError）
-        logger.info(f"正在读取 {page_count} 张图片{'并压缩' if need_compress else ''}...")
+        logger.info(f"正在读取 {page_count} 张图片...")
         image_data = []
-        total_raw = 0
-        total_compressed = 0
         for i, p in enumerate(image_files):
-            raw_bytes = p.read_bytes()
-            total_raw += len(raw_bytes)
-
-            if need_compress:
-                try:
-                    img = Image.open(io.BytesIO(raw_bytes))
-                    # 移除 alpha 通道（JPEG 不支持透明度）
-                    if img.mode in ('RGBA', 'LA', 'P'):
-                        img = img.convert('RGB')
-                    elif img.mode not in ('RGB', 'L'):
-                        img = img.convert('RGB')
-                    # 长边限制：等比缩小
-                    if max_image_pixels > 0:
-                        w, h = img.size
-                        max_dim = max(w, h)
-                        if max_dim > max_image_pixels:
-                            ratio = max_image_pixels / max_dim
-                            new_size = (int(w * ratio), int(h * ratio))
-                            img = img.resize(new_size, Image.LANCZOS)
-                    # 输出为 JPEG
-                    buf = io.BytesIO()
-                    img.save(buf, format='JPEG', quality=image_quality, optimize=True)
-                    compressed_bytes = buf.getvalue()
-                    total_compressed += len(compressed_bytes)
-                    image_data.append(compressed_bytes)
-                except Exception as e:
-                    logger.warning(f"图片 {p.name} 压缩失败: {e}，使用原始数据")
-                    total_compressed += len(raw_bytes)
-                    image_data.append(raw_bytes)
-            else:
-                total_compressed += len(raw_bytes)
-                image_data.append(raw_bytes)
-
+            image_data.append(p.read_bytes())
             if (i + 1) % 50 == 0 or (i + 1) == page_count:
                 logger.info(f"已读取 {i + 1}/{page_count} 张图片")
-
-        if need_compress and total_raw > 0:
-            ratio = (1 - total_compressed / total_raw) * 100
-            logger.info(
-                f"图片压缩完成: {total_raw / 1024 / 1024:.1f} MB -> "
-                f"{total_compressed / 1024 / 1024:.1f} MB (减小 {ratio:.0f}%)"
-            )
 
         # 使用 layout_fun 在 PDF 层面控制页面尺寸（基于 DPI 换算）
         # img2pdf 原生机制，无需对图片做任何重编码

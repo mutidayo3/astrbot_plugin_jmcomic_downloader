@@ -80,8 +80,6 @@ class JMComicPlugin(Star):
         download_timeout = self.config.get('download_timeout', 300)
         max_cache_count = max(0, self.config.get('max_cache_count', 20))
         pdf_resolution = self.config.get('pdf_resolution', 150.0)
-        self.image_quality = max(10, min(self.config.get('image_quality', 85), 100))
-        self.max_image_pixels = max(0, self.config.get('max_image_pixels', 0))
         self.max_pdf_size_mb = self.config.get('max_pdf_size_mb', 100)
         self.max_cache_size_mb = self.config.get('max_cache_size_mb', 200)
         max_concurrent = max(1, self.config.get('max_concurrent', 1))
@@ -118,8 +116,7 @@ class JMComicPlugin(Star):
             f"cleanup={self.auto_cleanup}, dpi={pdf_resolution}, "
             f"max_pdf_mb={self.max_pdf_size_mb}, cache_max={max_cache_count}, "
             f"cache_size_mb={self.max_cache_size_mb}, zip={self.enable_zip}, "
-            f"fifo={max_concurrent}, img_max={self.max_image_count}, "
-            f"img_q={self.image_quality}, img_px={self.max_image_pixels}, debug={self.debug_log}"
+            f"fifo={max_concurrent}, img_max={self.max_image_count}, debug={self.debug_log}"
         )
 
     def _debug(self, msg: str):
@@ -248,6 +245,8 @@ class JMComicPlugin(Star):
                     f"请 {remaining} 秒后再试"
                 )
                 return
+            # 立即记录时间戳，防止排队期间被重复请求
+            self._rate_limits.setdefault(chat_id, {})[album_id] = now
 
         # ---- 图片数量检查：防止超大本子耗尽资源 ----
         if self.max_image_count > 0:
@@ -358,8 +357,6 @@ class JMComicPlugin(Star):
                             image_files,
                             self.download_dir / f"{album_id}.pdf",
                             self._pdf_resolution,
-                            image_quality=self.image_quality,
-                            max_image_pixels=self.max_image_pixels,
                         )
                         self._debug(f"PDF 转换耗时: {time.time() - t0:.1f}s")
 
@@ -451,7 +448,7 @@ class JMComicPlugin(Star):
                         f"锁数量={len(self._locks)}"
                     )
 
-                    # ---- 记录限频时间戳 ----
+                    # ---- 记录限频时间戳（更新为完成时间，重置窗口起点） ----
                     if self.rate_limit_window > 0:
                         self._rate_limits.setdefault(chat_id, {})[album_id] = time.time()
 
