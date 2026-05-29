@@ -213,6 +213,7 @@ class JMComicPlugin(Star):
             return
 
         album_id = str(album_id).strip()
+        logger.info(f"[TRACE] download_jmcomic 接收到 album_id={album_id!r}")
         if not album_id.isdigit():
             yield event.plain_result("❌ 本子 ID 必须是数字")
             return
@@ -292,6 +293,7 @@ class JMComicPlugin(Star):
 
                         # ---- 4. 转 PDF ----
                         t0 = time.time()
+                        logger.info(f"[TRACE] 转PDF: album_id={album_id!r}")
                         pdf_path = await convert_to_pdf(
                             image_files,
                             self.download_dir / f"{album_id}.pdf",
