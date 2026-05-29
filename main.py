@@ -50,7 +50,7 @@ except ImportError as e:
     DEPENDENCIES_MET = False
 
 
-@register("jmcomic_downloader", "mutidayo3", "JMComic 本子下载器", "0.0.28")
+@register("jmcomic_downloader", "mutidayo3", "JMComic 本子下载器", "0.0.29")
 class JMComicPlugin(Star):
     """JMComic 本子下载器插件 — 编排层。
 
