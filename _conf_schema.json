@@ -93,6 +93,14 @@
     "description": "重复请求限频窗口(秒)",
     "hint": "同一聊天中同一本子在设定时间内只允许获取一次。0 表示不限制，建议 300~600"
   },
+  "max_image_count": {
+    "type": "int",
+    "default": 500,
+    "minimum": 0,
+    "maximum": 10000,
+    "description": "图片数量上限",
+    "hint": "漫画图片数量超过此值时拒绝下载，防止超大本子耗尽资源。0 表示不限制"
+  },
   "debug_log": {
     "type": "bool",
     "default": false,

@@ -84,6 +84,7 @@ class JMComicPlugin(Star):
         self.max_cache_size_mb = self.config.get('max_cache_size_mb', 200)
         max_concurrent = max(1, self.config.get('max_concurrent', 1))
         self.rate_limit_window = max(0, self.config.get('rate_limit_window', 300))
+        self.max_image_count = max(0, self.config.get('max_image_count', 500))
 
         # 装配子模块
         self._downloader = Downloader(
@@ -115,7 +116,7 @@ class JMComicPlugin(Star):
             f"cleanup={self.auto_cleanup}, dpi={pdf_resolution}, "
             f"max_pdf_mb={self.max_pdf_size_mb}, cache_max={max_cache_count}, "
             f"cache_size_mb={self.max_cache_size_mb}, zip={self.enable_zip}, "
-            f"fifo={max_concurrent}, debug={self.debug_log}"
+            f"fifo={max_concurrent}, img_max={self.max_image_count}, debug={self.debug_log}"
         )
 
     def _debug(self, msg: str):
@@ -244,6 +245,21 @@ class JMComicPlugin(Star):
                     f"请 {remaining} 秒后再试"
                 )
                 return
+
+        # ---- 图片数量检查：防止超大本子耗尽资源 ----
+        if self.max_image_count > 0:
+            try:
+                client = jmcomic.JmOption.default().new_jm_client()
+                album = client.get_album_detail(album_id)
+                if album:
+                    page_count = len(album) if hasattr(album, '__len__') else 0
+                    if page_count > self.max_image_count:
+                        yield event.plain_result(
+                            f"🚫 本子 {album_id} 共 {page_count} 页，超过上限 {self.max_image_count} 页，拒绝下载"
+                        )
+                        return
+            except Exception as e:
+                logger.warning(f"查询本子 {album_id} 页数失败: {e}，跳过图片数量检查")
 
         lock = self._get_album_lock(album_id)
         self._debug(f"获取本子锁: {album_id} (当前锁数量: {len(self._locks)})")
