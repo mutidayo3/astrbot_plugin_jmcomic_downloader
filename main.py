@@ -78,10 +78,12 @@ class JMComicPlugin(Star):
         max_workers = max(1, min(self.config.get('max_workers', 4), 8))
         image_format = self.config.get('image_format', 'webp')
         download_timeout = self.config.get('download_timeout', 300)
-        max_cache_count = max(0, self.config.get('max_cache_count', 20))
+        max_cache_count = max(0, self.config.get('max_cache_count', 10))
         pdf_resolution = self.config.get('pdf_resolution', 150.0)
         self.max_pdf_size_mb = self.config.get('max_pdf_size_mb', 100)
+        self.max_cache_size_mb = self.config.get('max_cache_size_mb', 200)
         max_concurrent = max(1, self.config.get('max_concurrent', 1))
+        self.rate_limit_window = max(0, self.config.get('rate_limit_window', 300))
 
         # 装配子模块
         self._downloader = Downloader(
@@ -104,12 +106,16 @@ class JMComicPlugin(Star):
         # 专辑级锁字典（key=album_id, value=asyncio.Lock）
         self._locks: Dict[str, asyncio.Lock] = {}
 
+        # 限频字典（key=chat_id, value={album_id: last_request_time}）
+        self._rate_limits: Dict[str, Dict[str, float]] = {}
+
         # 保存供日志输出的摘要
         self._config_summary = (
             f"workers={max_workers}, format={image_format}, timeout={download_timeout}s, "
             f"cleanup={self.auto_cleanup}, dpi={pdf_resolution}, "
             f"max_pdf_mb={self.max_pdf_size_mb}, cache_max={max_cache_count}, "
-            f"zip={self.enable_zip}, fifo={max_concurrent}, debug={self.debug_log}"
+            f"cache_size_mb={self.max_cache_size_mb}, zip={self.enable_zip}, "
+            f"fifo={max_concurrent}, debug={self.debug_log}"
         )
 
     def _debug(self, msg: str):
@@ -224,10 +230,33 @@ class JMComicPlugin(Star):
             yield event.plain_result("❌ 本子 ID 必须是数字")
             return
 
+        # ---- 限频检查：同一聊天中同一本子在窗口期内只允许获取一次 ----
+        now = time.time()
+        chat_id = getattr(event, 'session_id', None) or str(getattr(event, 'unified_msg_origin', 'unknown'))
+        if self.rate_limit_window > 0:
+            chat_limits = self._rate_limits.get(chat_id, {})
+            last_time = chat_limits.get(album_id, 0)
+            elapsed_since = now - last_time
+            if elapsed_since < self.rate_limit_window:
+                remaining = int(self.rate_limit_window - elapsed_since)
+                yield event.plain_result(
+                    f"⏰ 本子 {album_id} 在 {int(elapsed_since)} 秒前刚被获取过，"
+                    f"请 {remaining} 秒后再试"
+                )
+                return
+
         lock = self._get_album_lock(album_id)
         self._debug(f"获取本子锁: {album_id} (当前锁数量: {len(self._locks)})")
 
         async with lock:
+            # ---- 队列位置提示 ----
+            queued_count = self._fifo.queued
+            if queued_count > 0:
+                yield event.plain_result(
+                    f"⏳ 本子 {album_id} 的请求已加入处理队列，"
+                    f"前面还有 {queued_count} 个任务，请耐心等待..."
+                )
+
             async with self._fifo:
                 self._debug(f"FIFO 已获取，队列深度: {self._fifo.queued}")
                 album_dir: Optional[Path] = None
@@ -333,10 +362,17 @@ class JMComicPlugin(Star):
                             logger.warning(f"PDF 最终重命名失败: {e}，使用当前文件名")
                             expected_name = pdf_path.name
 
-                    # 更新缓存映射
-                    async with self._cache.cache_lock:
-                        self._cache.cache_map[album_id] = expected_name
-                        await self._cache.save_index()
+                    # 更新缓存映射（超大文件跳过缓存）
+                    pdf_size_mb = pdf_path.stat().st_size / 1024 / 1024
+                    if self.max_cache_size_mb > 0 and pdf_size_mb > self.max_cache_size_mb:
+                        logger.info(
+                            f"PDF 过大 ({pdf_size_mb:.1f} MB > {self.max_cache_size_mb} MB)，"
+                            f"跳过缓存: {expected_name}"
+                        )
+                    else:
+                        async with self._cache.cache_lock:
+                            self._cache.cache_map[album_id] = expected_name
+                            await self._cache.save_index()
 
                     # ---- 6. ZIP 压缩（可选） ----
                     final_file_path = pdf_path
@@ -387,6 +423,10 @@ class JMComicPlugin(Star):
                         f"锁数量={len(self._locks)}"
                     )
 
+                    # ---- 记录限频时间戳 ----
+                    if self.rate_limit_window > 0:
+                        self._rate_limits.setdefault(chat_id, {})[album_id] = time.time()
+
                 except asyncio.TimeoutError:
                     logger.error(f"下载本子 {album_id} 超时（子进程已终止）")
                     yield event.plain_result(
@@ -417,6 +457,17 @@ class JMComicPlugin(Star):
             for aid in stale:
                 self._locks.pop(aid, None)
             self._debug(f"锁字典清理: 移除 {len(stale)} 个过期锁, 剩余 {len(self._locks)}")
+        # 定期清理限频字典：清除超过窗口期 2 倍的过期条目
+        if len(self._rate_limits) > 100:
+            cutoff = time.time() - max(self.rate_limit_window * 2, 3600)
+            stale_chats = [
+                cid for cid, albums in self._rate_limits.items()
+                if not albums or all(t < cutoff for t in albums.values())
+            ]
+            for cid in stale_chats:
+                self._rate_limits.pop(cid, None)
+            if stale_chats:
+                self._debug(f"限频字典清理: 移除 {len(stale_chats)} 个过期条目, 剩余 {len(self._rate_limits)}")
 
     # ================================================================
     #  工具方法

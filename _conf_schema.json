@@ -8,11 +8,11 @@
   },
   "max_cache_count": {
     "type": "int",
-    "default": 20,
+    "default": 10,
     "minimum": 0,
     "maximum": 500,
     "description": "PDF 缓存数量上限",
-    "hint": "0 表示不缓存，默认 20 本，按 LRU 淘汰"
+    "hint": "0 表示不缓存，默认 10 本，按 LRU 淘汰"
   },
   "max_workers": {
     "type": "int",
@@ -68,14 +68,30 @@
   "enable_zip": {
     "type": "bool",
     "default": false,
-    "description": "启用 ZIP 压缩发送",
-    "hint": "开启后可减小体积并支持密码保护"
+    "description": "启用 ZIP 打包发送",
+    "hint": "将 PDF 打包为 ZIP（仅存储模式，不额外压缩），可防止平台在线扫描上传文件。支持可选 AES-256 加密"
   },
   "zip_password": {
     "type": "string",
     "default": "",
     "description": "ZIP 压缩包密码",
     "hint": "留空则不加密，建议使用强密码"
+  },
+  "max_cache_size_mb": {
+    "type": "int",
+    "default": 200,
+    "minimum": 0,
+    "maximum": 10000,
+    "description": "缓存文件大小上限(MB)",
+    "hint": "超过此大小的 PDF 不存入缓存，避免占用过多磁盘空间。0 表示不限制"
+  },
+  "rate_limit_window": {
+    "type": "int",
+    "default": 300,
+    "minimum": 0,
+    "maximum": 86400,
+    "description": "重复请求限频窗口(秒)",
+    "hint": "同一聊天中同一本子在设定时间内只允许获取一次。0 表示不限制，建议 300~600"
   },
   "debug_log": {
     "type": "bool",
