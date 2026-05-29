@@ -287,6 +287,7 @@ class JMComicPlugin(Star):
                 pdf_path: Optional[Path] = None
                 start_time = time.time()
                 from_cache = False
+                skipped_cache = False
                 album_title = album_id
 
                 try:
@@ -395,6 +396,7 @@ class JMComicPlugin(Star):
                             f"PDF 过大 ({pdf_size_mb:.1f} MB > {self.max_cache_size_mb} MB)，"
                             f"跳过缓存: {expected_name}"
                         )
+                        skipped_cache = True
                     else:
                         async with self._cache.cache_lock:
                             self._cache.cache_map[album_id] = expected_name
@@ -473,6 +475,14 @@ class JMComicPlugin(Star):
                     # LRU 缓存淘汰
                     if pdf_path:
                         await self._cache.cleanup(keep_path=pdf_path)
+
+                    # 超大文件：发送后删除，不占磁盘
+                    if skipped_cache and pdf_path and pdf_path.exists():
+                        try:
+                            pdf_path.unlink()
+                            logger.info(f"已删除超大缓存文件: {pdf_path.name}")
+                        except OSError as e:
+                            logger.warning(f"删除超大缓存文件失败: {e}")
 
         # 释放不再使用的锁对象
         if not lock.locked():
