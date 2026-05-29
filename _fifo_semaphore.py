@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import contextvars
 
 
 class _FIFOSemaphore:
@@ -13,13 +14,19 @@ class _FIFOSemaphore:
 
     适用于需要按请求先后顺序处理或发送的场景（如多用户并发请求时
     保证先提交的下载任务先得到处理）。
+
+    注意：_acquired_var 是类级 ContextVar，每个 asyncio Task 有独立副本，
+    确保不同协程的获取状态互不干扰。约束：同一进程只应创建一个实例。
     """
+
+    _acquired_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
+        '_fifo_acquired', default=False
+    )
 
     def __init__(self, value: int = 1):
         if value < 1:
             raise ValueError(f"Semaphore value must be >= 1, got {value}")
         self._value = value
-        self._acquired = False  # 实例级追踪，避免跨实例 ContextVar 污染
         self._waiters: list[asyncio.Future] = []
         self._queue_lock = asyncio.Lock()  # 保护 _waiters 列表的并发访问
 
@@ -29,17 +36,17 @@ class _FIFOSemaphore:
         return len(self._waiters)
 
     async def acquire(self):
-        self._acquired = False
+        _FIFOSemaphore._acquired_var.set(False)
         async with self._queue_lock:
             if self._value > 0:
                 self._value -= 1
-                self._acquired = True
+                _FIFOSemaphore._acquired_var.set(True)
                 return
             fut: asyncio.Future = asyncio.get_running_loop().create_future()
             self._waiters.append(fut)
         try:
             await fut
-            self._acquired = True
+            _FIFOSemaphore._acquired_var.set(True)
         except asyncio.CancelledError:
             async with self._queue_lock:
                 if fut in self._waiters:
@@ -79,11 +86,9 @@ class _FIFOSemaphore:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        # 使用实例变量追踪获取状态，避免跨实例 ContextVar 污染
-        # （asyncio 单线程模型下无需加锁）
-        if self._acquired:
+        # ContextVar 保证每个协程独立读取自己的获取状态
+        if _FIFOSemaphore._acquired_var.get():
             self.release()
-            self._acquired = False
         return False
 
     def __repr__(self):
