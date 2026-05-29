@@ -114,6 +114,8 @@ class JMComicPlugin(Star):
 
         # 限频字典（key=chat_id, value={album_id: last_request_time}）
         self._rate_limits: Dict[str, Dict[str, float]] = {}
+        # 限频检查锁，防止竞态导致重复请求漏过
+        self._rate_limit_lock = asyncio.Lock()
 
         # 保存供日志输出的摘要
         self._config_summary = (
@@ -257,18 +259,25 @@ class JMComicPlugin(Star):
         now = time.time()
         chat_id = getattr(event, 'session_id', None) or str(getattr(event, 'unified_msg_origin', 'unknown'))
         if self.rate_limit_window > 0:
-            chat_limits = self._rate_limits.get(chat_id, {})
-            last_time = chat_limits.get(album_id, 0)
-            elapsed_since = now - last_time
-            if elapsed_since < self.rate_limit_window:
-                remaining = int(self.rate_limit_window - elapsed_since)
-                yield event.plain_result(
-                    f"⏰ 本子 {album_id} 在 {int(elapsed_since)} 秒前刚被获取过，"
-                    f"请 {remaining} 秒后再试"
-                )
+            should_reject = False
+            reject_msg = ""
+            async with self._rate_limit_lock:
+                chat_limits = self._rate_limits.get(chat_id, {})
+                last_time = chat_limits.get(album_id, 0)
+                elapsed_since = now - last_time
+                if elapsed_since < self.rate_limit_window:
+                    remaining = int(self.rate_limit_window - elapsed_since)
+                    should_reject = True
+                    reject_msg = (
+                        f"⏰ 本子 {album_id} 在 {int(elapsed_since)} 秒前刚被获取过，"
+                        f"请 {remaining} 秒后再试"
+                    )
+                else:
+                    # 立即记录时间戳，防止排队期间被重复请求
+                    self._rate_limits.setdefault(chat_id, {})[album_id] = now
+            if should_reject:
+                yield event.plain_result(reject_msg)
                 return
-            # 立即记录时间戳，防止排队期间被重复请求
-            self._rate_limits.setdefault(chat_id, {})[album_id] = now
 
         # ---- 图片数量检查：防止超大本子耗尽资源 ----
         if self.max_image_count > 0:
