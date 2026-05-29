@@ -47,6 +47,22 @@
     "description": "PDF 分辨率 DPI",
     "hint": "影响 PDF 的清晰度与文件大小"
   },
+  "image_quality": {
+    "type": "int",
+    "default": 85,
+    "minimum": 10,
+    "maximum": 100,
+    "description": "图片 JPEG 压缩质量",
+    "hint": "值越小 PDF 越小但画质越低，85 为平衡点。设为 100 则无损嵌入原图"
+  },
+  "max_image_pixels": {
+    "type": "int",
+    "default": 0,
+    "minimum": 0,
+    "maximum": 16384,
+    "description": "图片长边最大像素",
+    "hint": "超过此尺寸的图片会等比缩小。0 表示不限制，建议 2400~3200 可大幅减小 PDF 体积"
+  },
   "max_pdf_size_mb": {
     "type": "int",
     "default": 100,
