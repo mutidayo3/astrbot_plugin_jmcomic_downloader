@@ -29,6 +29,7 @@ class Downloader:
     - Pipe 通信替代 Queue，消除 join_thread() 阻塞
     - 超时后两级终止（SIGTERM → SIGKILL）
     - 详细的 exitcode 诊断（OOM Killer、崩溃等）
+    - 支持外部 active_processes 集合追踪，便于统一清理
     """
 
     def __init__(
