@@ -56,11 +56,18 @@ class CacheManager:
         """将磁盘上的 PDF 文件同步到内存映射表。
 
         用于插件启动时将磁盘缓存恢复到内存中，应对上次运行中映射表未持久化的情况。
+        识别两种命名格式：{album_id}.pdf 和 JM{album_id}-{title}.pdf。
         """
         for pdf in self._list_cached():
             stem = pdf.stem
+            # 格式1: {album_id}.pdf（中间产物，降级恢复）
             if stem.isdigit() and stem not in self._cache_map:
                 self._cache_map[stem] = pdf.name
+            # 格式2: JM{album_id}-{title}.pdf（最终产物）
+            elif stem.startswith('JM') and '-' in stem:
+                album_id = stem[2:].split('-', 1)[0]
+                if album_id.isdigit() and album_id not in self._cache_map:
+                    self._cache_map[album_id] = pdf.name
 
     # ---- 持久化 ----
 

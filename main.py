@@ -11,12 +11,13 @@
 """
 
 import asyncio
+import multiprocessing
 import re
 import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Set
 
 # 确保插件目录在 sys.path 中，支持绝对导入同目录模块
 _plugin_dir = str(Path(__file__).resolve().parent)
@@ -86,12 +87,16 @@ class JMComicPlugin(Star):
         self.rate_limit_window = max(0, self.config.get('rate_limit_window', 300))
         self.max_image_count = max(0, self.config.get('max_image_count', 500))
 
+        # 活动下载子进程集合（用于插件重载时统一清理）
+        self._active_processes: Set[multiprocessing.Process] = set()
+
         # 装配子模块
         self._downloader = Downloader(
             max_workers=max_workers,
             image_format=image_format,
             download_timeout=download_timeout,
             debug_callback=self._debug,
+            active_processes=self._active_processes,
         )
         self._cache = CacheManager(
             max_cache_count=max_cache_count,
@@ -143,6 +148,9 @@ class JMComicPlugin(Star):
         # 同步磁盘文件到内存映射
         self._cache.sync_disk_to_memory()
 
+        # 清理上次异常重载遗留的脏文件（下载临时目录 + 中间 PDF）
+        self._cleanup_dirty_files()
+
         # 解析传输模式
         actual_mode = self.transfer_mode
         if actual_mode == "auto":
@@ -189,7 +197,21 @@ class JMComicPlugin(Star):
         logger.info(f"PDF 缓存: {cached_count}/{self._cache.max_cache_count} 本")
 
     async def terminate(self):
-        """插件卸载：停止文件服务器。"""
+        """插件卸载：终止所有下载子进程、停止文件服务器。"""
+        # 终止所有活动下载子进程，防止重载后残留进程继续下载
+        for p in list(self._active_processes):
+            if p.is_alive():
+                logger.info(f"正在终止残留下载子进程: PID={p.pid}")
+                p.terminate()
+                p.join(timeout=3)
+                if p.is_alive():
+                    logger.warning(f"子进程 {p.pid} 未响应 SIGTERM，强制杀死")
+                    p.kill()
+                    p.join(timeout=2)
+        if self._active_processes:
+            logger.info(f"已清理 {len(self._active_processes)} 个下载子进程")
+            self._active_processes.clear()
+
         if self.file_server:
             await self.file_server.stop()
         logger.info("JMComic 插件已卸载")
@@ -505,6 +527,62 @@ class JMComicPlugin(Star):
     # ================================================================
     #  工具方法
     # ================================================================
+
+    def _cleanup_dirty_files(self):
+        """清理上次异常重载遗留的脏文件。
+
+        处理两类脏文件：
+        1. 带编号的下载临时目录（如 448016/），内有不完整图片
+        2. 中间 PDF 文件（{album_id}.pdf），已重命名为 JM 前缀后该文件即为废稿
+        3. JM 前缀 PDF 未在 cache_map 中注册的孤本
+        """
+        if not self.download_dir or not self.download_dir.exists():
+            return
+
+        cache_ids = set(self._cache.cache_map.keys())
+        cleaned_dirs = 0
+        cleaned_pdfs = 0
+
+        for entry in self.download_dir.iterdir():
+            # 1. 清理数字命名的临时下载目录
+            if entry.is_dir() and entry.name.isdigit():
+                try:
+                    shutil.rmtree(entry, ignore_errors=True)
+                    cleaned_dirs += 1
+                    logger.info(f"已清理残留下载目录: {entry.name}")
+                except Exception as e:
+                    logger.warning(f"清理残留目录失败: {entry.name}: {e}")
+
+            # 2. 清理中间 PDF（{album_id}.pdf 且不在 cache_map 中）
+            elif entry.is_file() and entry.suffix.lower() == '.pdf' and entry.stem.isdigit():
+                if entry.stem not in cache_ids:
+                    try:
+                        entry.unlink()
+                        cleaned_pdfs += 1
+                        logger.info(f"已清理中间 PDF: {entry.name}")
+                    except OSError as e:
+                        logger.warning(f"清理中间 PDF 失败: {entry.name}: {e}")
+
+            # 3. 清理 JM 前缀但在 cache_map 中无记录的孤本 PDF
+            elif (
+                entry.is_file()
+                and entry.suffix.lower() == '.pdf'
+                and entry.stem.startswith('JM')
+                and '-' in entry.stem
+            ):
+                album_id = entry.stem[2:].split('-', 1)[0]
+                if album_id.isdigit() and album_id not in cache_ids:
+                    try:
+                        entry.unlink()
+                        cleaned_pdfs += 1
+                        logger.info(f"已清理孤本 PDF: {entry.name}")
+                    except OSError as e:
+                        logger.warning(f"清理孤本 PDF 失败: {entry.name}: {e}")
+
+        if cleaned_dirs or cleaned_pdfs:
+            logger.info(
+                f"脏文件清理完成: {cleaned_dirs} 个目录, {cleaned_pdfs} 个 PDF"
+            )
 
     @staticmethod
     def _sanitize_title(title: str) -> str:

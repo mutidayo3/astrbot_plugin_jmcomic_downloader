@@ -10,7 +10,7 @@ import shutil
 import signal
 import sys
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, Set
 
 from astrbot.api import logger
 
@@ -37,11 +37,13 @@ class Downloader:
         image_format: str = "webp",
         download_timeout: int = 300,
         debug_callback: Optional[Callable[[str], None]] = None,
+        active_processes: Optional[Set[multiprocessing.Process]] = None,
     ):
         self.max_workers = max_workers
         self.image_format = image_format
         self.download_timeout = download_timeout
         self._debug = debug_callback or (lambda msg: None)
+        self._active_processes: Set[multiprocessing.Process] = active_processes or set()
 
     async def download(self, album_id: str, download_dir: Path) -> str:
         """异步下载本子并返回标题。
@@ -73,6 +75,7 @@ class Downloader:
             daemon=True,
         )
         process.start()
+        self._active_processes.add(process)
         child_conn.close()  # 父进程不使用子端连接
         self._debug(f"下载子进程已启动: PID={process.pid}")
 
@@ -125,6 +128,7 @@ class Downloader:
                 process.terminate()
                 process.join(timeout=3)
             parent_conn.close()
+            self._active_processes.discard(process)
             self._debug(f"下载子进程已结束: PID={process.pid}, exitcode={process.exitcode}")
 
         file_count = sum(1 for _ in download_dir.rglob('*') if _.is_file())
