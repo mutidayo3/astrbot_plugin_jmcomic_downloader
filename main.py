@@ -96,13 +96,26 @@ class JMComicPlugin(Star):
         self._active_processes: Set[multiprocessing.Process] = set()
 
         # 装配子模块
-        self._downloader = Downloader(
-            max_workers=max_workers,
-            image_format=image_format,
-            download_timeout=download_timeout,
-            debug_callback=self._debug,
-            active_processes=self._active_processes,
-        )
+        # 兼容 GitHub CDN 缓存不一致：旧版 _downloader.py 可能没有 active_processes 参数
+        try:
+            self._downloader = Downloader(
+                max_workers=max_workers,
+                image_format=image_format,
+                download_timeout=download_timeout,
+                debug_callback=self._debug,
+                active_processes=self._active_processes,
+            )
+        except TypeError:
+            self._downloader = Downloader(
+                max_workers=max_workers,
+                image_format=image_format,
+                download_timeout=download_timeout,
+                debug_callback=self._debug,
+            )
+            logger.warning(
+                "Downloader 不支持 active_processes 参数（_downloader.py 为旧版），"
+                "子进程追踪已降级：插件重载时不会清理残留下载子进程"
+            )
         self._cache = CacheManager(
             max_cache_count=max_cache_count,
             download_dir=None,  # 延迟设置：initialize() 中确定
