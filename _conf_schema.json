@@ -8,11 +8,11 @@
   },
   "max_cache_count": {
     "type": "int",
-    "default": 10,
+    "default": 20,
     "minimum": 0,
     "maximum": 500,
     "description": "PDF 缓存数量上限",
-    "hint": "0 表示不缓存，默认 10 本，按 LRU 淘汰"
+    "hint": "0 表示不缓存，默认 20 本，按 LRU 淘汰"
   },
   "max_workers": {
     "type": "int",

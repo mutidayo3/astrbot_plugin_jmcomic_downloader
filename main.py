@@ -78,7 +78,7 @@ class JMComicPlugin(Star):
         max_workers = max(1, min(self.config.get('max_workers', 4), 8))
         image_format = self.config.get('image_format', 'webp')
         download_timeout = self.config.get('download_timeout', 300)
-        max_cache_count = max(0, self.config.get('max_cache_count', 10))
+        max_cache_count = max(0, self.config.get('max_cache_count', 20))
         pdf_resolution = self.config.get('pdf_resolution', 150.0)
         self.image_quality = max(10, min(self.config.get('image_quality', 85), 100))
         self.max_image_pixels = max(0, self.config.get('max_image_pixels', 0))
