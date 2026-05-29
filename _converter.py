@@ -1,6 +1,6 @@
 """文件转换工具：图片→PDF 转换 + PDF→ZIP 压缩。
 
-PDF 转换使用 img2pdf 流式处理，支持 DPI 控制及超时保护。
+PDF 转换使用 img2pdf 流式处理，支持 DPI 控制、JPEG 重压缩及超时保护。
 ZIP 压缩使用 pyzipper 实现 AES-256 强加密。
 """
 
