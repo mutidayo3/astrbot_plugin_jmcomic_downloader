@@ -24,6 +24,12 @@ _plugin_dir = str(Path(__file__).resolve().parent)
 if _plugin_dir not in sys.path:
     sys.path.insert(0, _plugin_dir)
 
+# 强制清除残留子模块缓存：AstrBot 重载插件时可能只清理了主模块和包名，
+# 子模块（如 _downloader）仍留在 sys.modules 中，导致 Python 加载旧版字节码而非磁盘新文件。
+for _stale_mod in list(sys.modules):
+    if _stale_mod.startswith('data.plugins.jmcomic_downloader.'):
+        del sys.modules[_stale_mod]
+
 from astrbot.api.event import filter as astr_filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
@@ -96,7 +102,7 @@ class JMComicPlugin(Star):
         self._active_processes: Set[multiprocessing.Process] = set()
 
         # 装配子模块
-        # 兼容 GitHub CDN 缓存不一致：旧版 _downloader.py 可能没有 active_processes 参数
+        # 兼容旧版 _downloader.py（sys.modules 缓存或 CDN 不一致时降级）
         try:
             self._downloader = Downloader(
                 max_workers=max_workers,
