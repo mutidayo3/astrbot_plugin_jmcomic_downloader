@@ -59,15 +59,9 @@ class CacheManager:
         识别两种命名格式：{album_id}.pdf 和 JM{album_id}-{title}.pdf。
         """
         for pdf in self._list_cached():
-            stem = pdf.stem
-            # 格式1: {album_id}.pdf（中间产物，降级恢复）
-            if stem.isdigit() and stem not in self._cache_map:
-                self._cache_map[stem] = pdf.name
-            # 格式2: JM{album_id}-{title}.pdf（最终产物）
-            elif stem.startswith('JM') and '-' in stem:
-                album_id = stem[2:].split('-', 1)[0]
-                if album_id.isdigit() and album_id not in self._cache_map:
-                    self._cache_map[album_id] = pdf.name
+            album_id = self._extract_album_id(pdf.stem)
+            if album_id is not None and album_id not in self._cache_map:
+                self._cache_map[album_id] = pdf.name
 
     # ---- 持久化 ----
 
@@ -158,18 +152,31 @@ class CacheManager:
                 oldest = to_check.pop()  # 列表按 atime 降序，最后一个是最旧的
                 try:
                     # 同步清理内存映射表中的对应条目
-                    evicted_stem = oldest.stem
-                    if evicted_stem in self._cache_map:
-                        del self._cache_map[evicted_stem]
+                    album_id = self._extract_album_id(oldest.stem)
+                    if album_id and album_id in self._cache_map:
+                        del self._cache_map[album_id]
                     oldest.unlink()
                     evicted += 1
                 except OSError:
                     pass
 
             if evicted:
+                await self.save_index()
                 self._debug(f"缓存淘汰完成: 删除 {evicted} 个, 剩余 {len(cached) - evicted} 个")
 
-    # ---- 内部 ----
+    def _extract_album_id(self, stem: str) -> Optional[str]:
+        """从文件名 stem 提取 album_id。支持两种命名格式。
+
+        - 格式1: 纯数字 ID（如 422866）
+        - 格式2: JM{id}-{title}（如 JM422866-SomeTitle）
+        """
+        if stem.isdigit():
+            return stem
+        if stem.startswith('JM') and '-' in stem:
+            album_id = stem[2:].split('-', 1)[0]
+            if album_id.isdigit():
+                return album_id
+        return None
 
     def _list_cached(self) -> list[Path]:
         """列出所有缓存 PDF，按 atime 降序排列（最新的在前）。"""

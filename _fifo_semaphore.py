@@ -52,9 +52,10 @@ class _FIFOSemaphore:
                 if fut in self._waiters:
                     # 仍在队列中，release() 尚未处理此 Future，安全移除
                     self._waiters.remove(fut)
-                elif fut.done() and not fut.cancelled():
+                elif fut.done():
                     # release() 已弹出此 Future 并通过 call_soon 调度了 set_result，
-                    # 但任务在回调执行前被取消，导致槽位未被消费。
+                    # 但任务在回调执行前被取消（fut.cancelled() == True），
+                    # 导致槽位已被 pop 消费但未被实际使用。
                     # 重新触发 release 将槽位传递给下一个等待者，避免泄漏。
                     self.release()
             raise

@@ -50,7 +50,7 @@ except ImportError as e:
     DEPENDENCIES_MET = False
 
 
-@register("jmcomic_downloader", "mutidayo3", "JMComic 本子下载器", "0.0.29")
+@register("jmcomic_downloader", "mutidayo3", "JMComic 本子下载器", "0.0.30")
 class JMComicPlugin(Star):
     """JMComic 本子下载器插件 — 编排层。
 
@@ -290,8 +290,6 @@ class JMComicPlugin(Star):
 
         # ---- 图片数量检查：防止超大本子耗尽资源 ----
         if self.max_image_count > 0:
-            if await self._msg.send_text(event, f"🔍 正在查询本子 {album_id} 信息...", 30) is None:
-                yield event.plain_result(f"🔍 正在查询本子 {album_id} 信息...")
             try:
                 client = jmcomic.JmOption.default().new_jm_client()
                 album = client.get_album_detail(album_id)
@@ -313,15 +311,10 @@ class JMComicPlugin(Star):
             # ---- 队列位置提示 ----
             queued_count = self._fifo.queued
             if queued_count > 0:
-                if await self._msg.send_text(event, f"⏳ 本子 {album_id} 的请求已加入处理队列，前面还有 {queued_count} 个任务，请耐心等待...", 30) is None:
+                if await self._msg.send_text(event, f"⏳ 本子 {album_id} 已加入队列，前面还有 {queued_count} 个任务，请耐心等待...", 30) is None:
                     yield event.plain_result(
-                        f"⏳ 本子 {album_id} 的请求已加入处理队列，"
+                        f"⏳ 本子 {album_id} 已加入队列，"
                         f"前面还有 {queued_count} 个任务，请耐心等待..."
-                    )
-            else:
-                if await self._msg.send_text(event, f"✅ 已接收本子 {album_id} 的请求，正在处理...", 30) is None:
-                    yield event.plain_result(
-                        f"✅ 已接收本子 {album_id} 的请求，正在处理..."
                     )
 
             async with self._fifo:
@@ -342,8 +335,6 @@ class JMComicPlugin(Star):
                         from_cache = True
                         file_size_mb = pdf_path.stat().st_size / 1024 / 1024
                         logger.info(f"PDF 缓存命中: {pdf_path.name} ({file_size_mb:.2f} MB)")
-                        if await self._msg.send_text(event, "📦 命中本地缓存，正在获取本子信息...", 30) is None:
-                            yield event.plain_result("📦 命中本地缓存，正在获取本子信息...")
 
                         # 尝试获取标题以正确命名
                         try:
@@ -366,8 +357,8 @@ class JMComicPlugin(Star):
                             logger.warning(f"获取缓存本子标题失败，将使用 ID 作为文件名: {e}")
                     else:
                         # ---- 2. 下载 ----
-                        if await self._msg.send_text(event, f"📥 开始下载本子 {album_id}...", 30) is None:
-                            yield event.plain_result(f"📥 开始下载本子 {album_id}...")
+                        if await self._msg.send_text(event, f"📥 正在下载本子 {album_id}，完成后自动转换为 PDF...", 30) is None:
+                            yield event.plain_result(f"📥 正在下载本子 {album_id}，完成后自动转换为 PDF...")
                         album_dir = self.download_dir / album_id
 
                         if album_dir.exists():
@@ -376,7 +367,8 @@ class JMComicPlugin(Star):
                         album_dir.mkdir(parents=True, exist_ok=True)
 
                         t0 = time.time()
-                        album_title = await self._downloader.download(album_id, album_dir)
+                        raw_title = await self._downloader.download(album_id, album_dir)
+                        album_title = self._sanitize_title(raw_title)
                         self._debug(f"下载耗时: {time.time() - t0:.1f}s, 标题: {album_title}")
 
                         # ---- 3. 收集图片 ----
@@ -391,11 +383,6 @@ class JMComicPlugin(Star):
                         if not image_files:
                             yield event.plain_result("❌ 下载完成后未找到图片文件")
                             return
-
-                        if await self._msg.send_text(event, f"✅ 下载完成 ({len(image_files)} 页)，正在转换为 PDF...", 30) is None:
-                            yield event.plain_result(
-                                f"✅ 下载完成 ({len(image_files)} 页)，正在转换为 PDF..."
-                            )
 
                         # ---- 4. 转 PDF ----
                         t0 = time.time()
@@ -413,12 +400,6 @@ class JMComicPlugin(Star):
 
                         file_size_mb = pdf_path.stat().st_size / 1024 / 1024
                         logger.info(f"PDF 生成成功: {pdf_path.name} ({file_size_mb:.2f} MB)")
-
-                        if file_size_mb > self.max_pdf_size_mb:
-                            if await self._msg.send_text(event, f"⚠️ PDF 文件过大 ({file_size_mb:.1f} MB)，可能发送较慢或失败", 30) is None:
-                                yield event.plain_result(
-                                    f"⚠️ PDF 文件过大 ({file_size_mb:.1f} MB)，可能发送较慢或失败"
-                                )
 
                     # ---- 5. 统一命名（JM{id}-{title}.pdf） ----
                     expected_name = f"JM{album_id}-{album_title}.pdf"
@@ -469,13 +450,6 @@ class JMComicPlugin(Star):
                             logger.warning(f"ZIP 压缩失败，回退发送原始 PDF: {pdf_path.name}")
 
                     # ---- 7. 发送文件 ----
-                    if from_cache:
-                        if await self._msg.send_text(event, f"📚 正在发送缓存的本子 {album_id}...", 30) is None:
-                            yield event.plain_result(f"📚 正在发送缓存的本子 {album_id}...")
-                    else:
-                        if await self._msg.send_text(event, f"📚 本子 {album_id} 处理完成，正在发送文件...", 30) is None:
-                            yield event.plain_result(f"📚 本子 {album_id} 处理完成，正在发送文件...")
-
                     self._debug(f"准备发送文件: {final_file_name} ({final_file_path})")
                     await self._sender.send(event, final_file_path, final_file_name, album_id)
                     self._debug("文件发送完成")
