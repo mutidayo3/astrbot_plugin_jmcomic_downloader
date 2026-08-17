@@ -3,51 +3,84 @@
 提供 Docker 运行环境检测、宿主机 IP 获取、图片文件收集等纯函数。
 """
 
+import functools
 import os
+import re
 import socket
 from pathlib import Path
 
+# cgroup 路径中必须出现容器 ID 才算容器内。
+# 匹配 /docker/<id>、/system.slice/docker-<id>.scope、/kubepods/...、/lxc/<name>，
+# 但不匹配宿主机上名字里带 docker 的 systemd 单元（如 docker.service）。
+_CONTAINER_CGROUP_RE = re.compile(
+    r'/(?:docker|containerd|crio|libpod|podman)[/-][0-9a-f]{12,}'
+    r'|/kubepods'
+    r'|/lxc/'
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _detect_container() -> tuple[bool, str]:
+    """检测当前进程是否运行在容器内，返回 (结果, 判定依据)。
+
+    只依据【当前进程自身】的特征判断，绝不检查宿主机的全局状态：
+    - /.dockerenv、/run/.containerenv 标记文件（最可靠）
+    - 自身 / PID 1 的 cgroup 路径中的容器 ID（cgroup v1、kubepods）
+    - 根文件系统为 overlay（无标记文件的精简镜像兜底）
+    - 环境变量 container
+
+    【历史坑】旧版本会扫描 /proc/1/mountinfo 中是否含 "docker" 字样，
+    但宿主机只要跑过任意容器，该文件就会出现 /var/lib/docker/overlay2/...
+    挂载记录，于是宿主机被误判为容器，插件转而走 HTTP 传输模式，
+    最终因缺少 file_server_base_url 而发送失败。切勿恢复该检查。
+    """
+    # 1. 容器运行时标记文件（Docker / Podman，最可靠）
+    for marker in ('/.dockerenv', '/run/.containerenv'):
+        if os.path.exists(marker):
+            return True, f"存在标记文件 {marker}"
+
+    # 2. 自身与 PID 1 的 cgroup 路径中带容器 ID（cgroup v1 / Kubernetes）
+    for cgroup_file in ('/proc/self/cgroup', '/proc/1/cgroup'):
+        try:
+            with open(cgroup_file, 'r') as f:
+                for line in f:
+                    # 格式: hierarchy-ID:controller-list:cgroup-path
+                    path = line.rstrip('\n').split(':', 2)[-1]
+                    if _CONTAINER_CGROUP_RE.search(path):
+                        return True, f"{cgroup_file} 含容器 cgroup 路径: {path}"
+        except Exception:
+            continue
+
+    # 3. 根文件系统为 overlay（cgroup v2 容器常见，宿主机通常是 ext4/xfs/btrfs）
+    try:
+        with open('/proc/self/mountinfo', 'r') as f:
+            for line in f:
+                # 格式: ... mount-point options [optional fields] - fstype source superopts
+                left, sep, right = line.partition(' - ')
+                if not sep:
+                    continue
+                fields = left.split()
+                if len(fields) > 4 and fields[4] == '/' and right.split()[0] == 'overlay':
+                    return True, "根文件系统为 overlay"
+    except Exception:
+        pass
+
+    # 4. 环境变量（systemd-nspawn / Podman / LXC 会设置）
+    env_container = os.environ.get('container', '')
+    if env_container in ('docker', 'podman', 'oci', 'lxc', 'containerd'):
+        return True, f"环境变量 container={env_container}"
+
+    return False, "未发现容器特征"
+
 
 def is_running_in_docker() -> bool:
-    """增强版 Docker 环境检测（兼容 cgroup v1/v2）。
+    """当前进程是否运行在容器内（结果全程缓存，避免前后判定不一致）。"""
+    return _detect_container()[0]
 
-    通过多层检查确保在各种 Docker 运行时环境下都能准确识别：
-    - /.dockerenv 文件（最可靠）
-    - cgroup v1 信息（/proc/1/cgroup）
-    - cgroup v2 信息（/proc/1/mountinfo, /proc/self/cgroup）
-    - 环境变量 container=docker
-    """
-    # 1. 检查 /.dockerenv 文件 (最可靠)
-    if os.path.exists('/.dockerenv'):
-        return True
-    # 2. 检查 cgroup v1 信息
-    try:
-        with open('/proc/1/cgroup', 'r') as f:
-            content = f.read()
-            if 'docker' in content or 'kubepods' in content:
-                return True
-    except Exception:
-        pass
-    # 3. 检查 cgroup v2 信息（现代 Docker + systemd）
-    try:
-        with open('/proc/1/mountinfo', 'r') as f:
-            content = f.read()
-            if 'docker' in content or 'kubepods' in content:
-                return True
-    except Exception:
-        pass
-    # 4. 检查 PID 1 的 cgroup 控制器路径（cgroup v2 格式）
-    try:
-        with open('/proc/self/cgroup', 'r') as f:
-            content = f.read()
-            if 'docker' in content or 'kubepods' in content:
-                return True
-    except Exception:
-        pass
-    # 5. 检查环境变量
-    if os.environ.get('container') == 'docker':
-        return True
-    return False
+
+def container_detection_reason() -> str:
+    """容器检测的判定依据，仅用于日志排查。"""
+    return _detect_container()[1]
 
 
 def get_host_ip(file_server_port: int = 18790) -> str:

@@ -43,17 +43,19 @@ AstrBot 插件，支持通过本子 ID 从 JMComic 下载并自动转换为 PDF 
 
 #### `auto`（推荐）
 - 插件自动检测运行环境
-- 检测到 Docker 容器 → 自动使用 `docker` 模式
-- 非 Docker 环境 → 自动使用 `local` 模式
+- 检测到自身运行在容器内 → 自动使用 `docker` 模式
+- 运行在宿主机 → 自动使用 `local` 模式
+- 检测只依据当前进程自身的特征（`/.dockerenv`、自身 cgroup、根文件系统类型），
+  宿主机上装了 Docker 或跑着别的容器都不会误判
 
 #### `local`
-- 直接使用本地文件路径发送 PDF
-- **适用场景**：AstrBot 与 NapCat/QQBot 在同一台机器、同一用户下运行，可直接访问文件系统
-- **优点**：无需配置端口、无需 HTTP 服务，最简单
-- **缺点**：Docker 环境下会因文件系统隔离导致发送失败
+- 把 PDF 的**本地绝对路径**交给 OneBot API (`upload_group_file` / `upload_private_file`) 发送
+- **适用场景**：AstrBot 与 NapCat/QQBot 在同一台机器上运行，可直接访问同一文件系统
+- **优点**：无需配置端口、无需 HTTP 服务，大文件不经过网络传输，最快最简单
+- **缺点**：AstrBot 与协议端文件系统隔离（分处不同容器）时无法使用
 
 #### `docker`
-- 启动内置 HTTP 文件服务器，通过 OneBot API (`upload_group_file` / `upload_private_file`) 发送文件
+- 启动内置 HTTP 文件服务器，把文件 URL 交给 OneBot API (`upload_group_file` / `upload_private_file`) 发送
 - **适用场景**：AstrBot 与 NapCat 分别运行在不同 Docker 容器中，无共享文件夹
 - **优点**：完美解决跨容器文件传输问题，支持大文件
 - **缺点**：需要正确配置网络，让 NapCat 能访问到 AstrBot 的文件服务器
@@ -167,7 +169,7 @@ hostname -I
 ## 常见问题
 
 ### Q1: 发送文件失败，提示"文件消息缺少参数"
-**A**：这是 AstrBot `File` 组件在 aiocqhttp 适配器下的已知问题。请确保 `transfer_mode` 设置为 `auto` 或 `docker`，插件会自动使用 OneBot API 绕过此问题。
+**A**：这是 AstrBot `File` 组件在 aiocqhttp 适配器下的已知问题。插件在 `local` / `docker` 两种模式下都会直接调用 OneBot 的 `upload_group_file` / `upload_private_file` 绕过此问题，任意 `transfer_mode` 均可。
 
 ### Q2: NapCat 提示下载文件超时
 **A**：`file_server_base_url` 配置错误，NapCat 无法访问到 AstrBot 的文件服务器。请按上文【Docker 部署特别说明】排查网络。
@@ -179,12 +181,19 @@ hostname -I
 **A**：如果您设置了 `zip_password`，插件会使用 AES-256 算法进行加密。请使用支持 AES 加密的解压软件（如 7-Zip, WinRAR, Bandizip）并输入正确密码解压。
 
 ### Q5: 本地运行不想用 HTTP 服务
-**A**：将 `transfer_mode` 设为 `local`，插件不会启动 HTTP 服务器，直接使用本地文件路径发送。
+**A**：将 `transfer_mode` 设为 `local`，插件不会启动 HTTP 服务器，直接把本地绝对路径交给 OneBot 上传接口。
+
+### Q6: 报错 `未知文件类型或路径不存在: /files/xxx.pdf`
+**A**：v0.0.32 之前的版本在宿主机部署时可能出现，成因是环境检测误判成容器、走了 HTTP 模式，但没有可用的 `file_server_base_url`，导致拼出 `/files/xxx.pdf` 这种相对路径被协议端当本地路径解析。升级到 v0.0.32 即可；旧版可临时把 `transfer_mode` 手动设为 `local` 规避。
+
+### Q7: 日志显示自动检测的模式不对
+**A**：启动日志会打印判定依据，例如 `自动检测到运行环境: local (容器内=False, 依据: 未发现容器特征)`。如与实际不符，把 `transfer_mode` 显式设为 `local` 或 `docker` 即可，插件不会再自行推断。
 
 ## 版本历史
 
 | 版本 | 更新内容 |
 |------|----------|
+| 0.0.32 | **修复宿主机部署时发送文件失败（`未知文件类型或路径不存在: /files/xxx.pdf`）**：<br>- 修复容器检测误判：旧逻辑扫描 `/proc/1/mountinfo` 是否含 `docker` 字样，而宿主机只要跑过任意容器该文件就会出现 `/var/lib/docker/overlay2/...` 挂载记录，导致宿主机被判为容器<br>- 检测改为只看当前进程自身特征（标记文件、自身 cgroup 中的容器 ID、根文件系统是否为 overlay），并缓存结果，避免运行期容器状态变化导致前后判定不一致<br>- 传输模式只在初始化时解析一次并传给发送器，消除"初始化判为 local、发送时判为 docker"造成的空 `file_server_base_url`<br>- `docker` 模式缺少 `file_server_base_url` 时不再拼出 `/files/xxx.pdf` 相对路径，自动回退为本地路径发送并告警<br>- `local` 模式改用 OneBot `upload_group_file` / `upload_private_file` 直传本地绝对路径，同机部署不再经过 HTTP，大文件更快<br>- HTTP 文件服务器启动失败（如端口占用）时降级为 `local` 模式，不再让插件初始化中断<br>- 上传接口失败时回退 File 组件，群号/QQ 号改用 `get_group_id()` / `get_sender_id()` 获取 |
 | 0.0.31 | **撤回机制优化**：状态消息改为任务完成后集中撤回，避免下载耗时过长时状态消息提前消失
 | 0.0.27 | **多并发资源优化与请求顺序保证**：<br>- 新增 `_FIFOSemaphore` 类，实现严格按请求先后顺序放行的有序信号量，避免标准 `Semaphore` 的无序唤醒问题<br>- 新增 `max_concurrent` 配置项（默认 1），限制全局并发下载数，防止多请求同时启动子进程导致资源耗尽<br>- FIFO 信号量包裹整个下载→转换→发送流程，确保文件按请求顺序发送 |
 | 0.0.26 | **文件命名规范优化**：<br>- PDF/ZIP 文件名统一为 `JM{本子ID}-{本子标题}.{pdf,zip}` 格式，便于识别和检索 |

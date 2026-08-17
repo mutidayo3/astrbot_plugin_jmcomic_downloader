@@ -29,7 +29,12 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 
 from _fifo_semaphore import _FIFOSemaphore
-from _utils import is_running_in_docker, get_host_ip, collect_image_files
+from _utils import (
+    is_running_in_docker,
+    container_detection_reason,
+    get_host_ip,
+    collect_image_files,
+)
 from _file_server import FileServer
 from _cache_manager import CacheManager
 from _downloader import Downloader
@@ -50,7 +55,7 @@ except ImportError as e:
     DEPENDENCIES_MET = False
 
 
-@register("jmcomic_downloader", "mutidayo3", "JMComic 本子下载器", "0.0.31")
+@register("jmcomic_downloader", "mutidayo3", "JMComic 本子下载器", "0.0.32")
 class JMComicPlugin(Star):
     """JMComic 本子下载器插件 — 编排层。
 
@@ -71,6 +76,8 @@ class JMComicPlugin(Star):
         self.file_server_port = self.config.get('file_server_port', 18790)
         self.file_server_base_url = self.config.get('file_server_base_url', "").rstrip("/")
         self.file_server: Optional[FileServer] = None
+        # 实际生效的传输模式，由 initialize() 解析一次后固定
+        self.actual_mode = "local"
 
         # 压缩配置
         self.enable_zip = self.config.get('enable_zip', False)
@@ -158,12 +165,25 @@ class JMComicPlugin(Star):
         # 清理上次异常重载遗留的脏文件（下载临时目录 + 中间 PDF）
         self._cleanup_dirty_files()
 
-        # 解析传输模式
-        actual_mode = self.transfer_mode
+        # 解析传输模式（只在此处解析一次，发送时不再重新判定，
+        # 避免宿主机上容器状态变化导致初始化与发送时的模式不一致）
+        configured_mode = str(self.transfer_mode).strip().lower()
+        if configured_mode not in ("auto", "local", "docker"):
+            logger.warning(
+                f"未知的 transfer_mode 配置值: {self.transfer_mode!r}，已按 auto 处理"
+            )
+            configured_mode = "auto"
+        self.transfer_mode = configured_mode
+
+        actual_mode = configured_mode
         if actual_mode == "auto":
-            actual_mode = "docker" if is_running_in_docker() else "local"
-            logger.info(f"自动检测到运行环境: {actual_mode}")
-        self._debug(f"配置传输模式: {self.transfer_mode} -> 实际模式: {actual_mode}")
+            in_container = is_running_in_docker()
+            actual_mode = "docker" if in_container else "local"
+            logger.info(
+                f"自动检测到运行环境: {actual_mode} "
+                f"(容器内={in_container}, 依据: {container_detection_reason()})"
+            )
+        self._debug(f"配置传输模式: {configured_mode} -> 实际模式: {actual_mode}")
 
         # Docker 模式下启动 HTTP 文件服务器
         if actual_mode == "docker":
@@ -172,8 +192,20 @@ class JMComicPlugin(Star):
                 port=self.file_server_port,
                 debug=self.debug_log,
             )
-            await self.file_server.start()
+            try:
+                await self.file_server.start()
+            except OSError:
+                # 端口被占用等原因启动失败：降级为本地模式，
+                # 否则后续发送会拼出无效 URL 并被协议端拒绝
+                self.file_server = None
+                actual_mode = "local"
+                logger.error(
+                    f"HTTP 文件服务器启动失败，已降级为 local 模式。"
+                    f"若 AstrBot 与协议端不在同一文件系统，请释放端口 "
+                    f"{self.file_server_port} 或改用其他端口后重载插件。"
+                )
 
+        if actual_mode == "docker":
             if not self.file_server_base_url:
                 host_ip = get_host_ip(self.file_server_port)
                 self.file_server_base_url = f"http://{host_ip}:{self.file_server_port}"
@@ -185,13 +217,13 @@ class JMComicPlugin(Star):
         else:
             logger.info("本地模式运行，未启动 HTTP 文件服务器")
 
+        self.actual_mode = actual_mode
+
         # 装配文件发送器
         self._sender = FileSender(
-            transfer_mode=self.transfer_mode,
+            mode=actual_mode,
             file_server_base_url=self.file_server_base_url,
             debug_callback=self._debug,
-            file_server=self.file_server,
-            is_docker_checker=is_running_in_docker,
         )
 
         cached_count = len(self._cache._list_cached())
