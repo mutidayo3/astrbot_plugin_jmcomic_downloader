@@ -27,7 +27,6 @@ AstrBot 插件，支持通过本子 ID 从 JMComic 下载并自动转换为 PDF 
 | `download_timeout` | 整数 | `300` | 单本下载超时时间（秒） |
 | `auto_cleanup` | 布尔 | `true` | 发送后是否自动清理临时图片目录 |
 | `pdf_resolution` | 浮点数 | `150.0` | PDF 分辨率 DPI |
-| `max_pdf_size_mb` | 整数 | `100` | PDF 大小警告阈值（MB），超过会提示 |
 | `max_cache_size_mb` | 整数 | `200` | 缓存文件大小上限（MB），超过不缓存（0 不限制） |
 | `file_server_port` | 整数 | `18790` | HTTP 文件服务器端口（Docker 模式需映射到宿主机） |
 | `file_server_base_url` | 字符串 | `""` | Docker 模式下文件服务器的外网访问地址，如 `http://172.17.0.1:18790` |
@@ -193,6 +192,7 @@ hostname -I
 
 | 版本 | 更新内容 |
 |------|----------|
+| 0.0.33 | **移除失效的 `max_pdf_size_mb` 配置项**：该项的唯一用途——PDF 超过阈值时向用户发送"文件过大"提示——已在 v0.0.30 的消息合并改动中被删除，配置项自此空转两个版本（只被读取和打印进调试摘要，从不参与任何判断）。现一并清理 `_conf_schema.json`、`main.py` 与文档；WebUI 中该项会消失，已保存的旧值自动失效，无需手动处理 |
 | 0.0.32 | **修复宿主机部署时发送文件失败（`未知文件类型或路径不存在: /files/xxx.pdf`）**：<br>- 修复容器检测误判：旧逻辑扫描 `/proc/1/mountinfo` 是否含 `docker` 字样，而宿主机只要跑过任意容器该文件就会出现 `/var/lib/docker/overlay2/...` 挂载记录，导致宿主机被判为容器<br>- 检测改为只看当前进程自身特征（标记文件、自身 cgroup 中的容器 ID、根文件系统是否为 overlay），并缓存结果，避免运行期容器状态变化导致前后判定不一致<br>- 传输模式只在初始化时解析一次并传给发送器，消除"初始化判为 local、发送时判为 docker"造成的空 `file_server_base_url`<br>- `docker` 模式缺少 `file_server_base_url` 时不再拼出 `/files/xxx.pdf` 相对路径，自动回退为本地路径发送并告警<br>- `local` 模式改用 OneBot `upload_group_file` / `upload_private_file` 直传本地绝对路径，同机部署不再经过 HTTP，大文件更快<br>- HTTP 文件服务器启动失败（如端口占用）时降级为 `local` 模式，不再让插件初始化中断<br>- 上传接口失败时回退 File 组件，群号/QQ 号改用 `get_group_id()` / `get_sender_id()` 获取 |
 | 0.0.31 | **撤回机制优化**：状态消息改为任务完成后集中撤回，避免下载耗时过长时状态消息提前消失
 | 0.0.27 | **多并发资源优化与请求顺序保证**：<br>- 新增 `_FIFOSemaphore` 类，实现严格按请求先后顺序放行的有序信号量，避免标准 `Semaphore` 的无序唤醒问题<br>- 新增 `max_concurrent` 配置项（默认 1），限制全局并发下载数，防止多请求同时启动子进程导致资源耗尽<br>- FIFO 信号量包裹整个下载→转换→发送流程，确保文件按请求顺序发送 |

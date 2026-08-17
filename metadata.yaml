@@ -1,7 +1,7 @@
 name: jmcomic_downloader # 插件唯一识别名
 display_name: JMComic 本子下载器 # 用于展示的名字
 desc: 这是一个 JMComic 本子下载器，支持下载本子并转换为 PDF 格式发送给用户。 # 插件简短描述
-version: v0.0.32 # 插件版本号
+version: v0.0.33 # 插件版本号
 author: mutidayo3 # 作者
 repo: https://github.com/mutidayo3/astrbot_plugin_jmcomic_downloader # 插件的仓库地址
 astrbot_version: ">=4.23.0"

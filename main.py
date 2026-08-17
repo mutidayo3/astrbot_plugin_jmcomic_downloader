@@ -55,7 +55,7 @@ except ImportError as e:
     DEPENDENCIES_MET = False
 
 
-@register("jmcomic_downloader", "mutidayo3", "JMComic 本子下载器", "0.0.32")
+@register("jmcomic_downloader", "mutidayo3", "JMComic 本子下载器", "0.0.33")
 class JMComicPlugin(Star):
     """JMComic 本子下载器插件 — 编排层。
 
@@ -89,7 +89,6 @@ class JMComicPlugin(Star):
         download_timeout = self.config.get('download_timeout', 300)
         max_cache_count = max(0, self.config.get('max_cache_count', 20))
         pdf_resolution = self.config.get('pdf_resolution', 150.0)
-        self.max_pdf_size_mb = self.config.get('max_pdf_size_mb', 100)
         self.max_cache_size_mb = self.config.get('max_cache_size_mb', 200)
         max_concurrent = max(1, self.config.get('max_concurrent', 1))
         self.rate_limit_window = max(0, self.config.get('rate_limit_window', 300))
@@ -133,9 +132,9 @@ class JMComicPlugin(Star):
         self._config_summary = (
             f"workers={max_workers}, format={image_format}, timeout={download_timeout}s, "
             f"cleanup={self.auto_cleanup}, dpi={pdf_resolution}, "
-            f"max_pdf_mb={self.max_pdf_size_mb}, cache_max={max_cache_count}, "
-            f"cache_size_mb={self.max_cache_size_mb}, zip={self.enable_zip}, "
-            f"fifo={max_concurrent}, img_max={self.max_image_count}, debug={self.debug_log}"
+            f"cache_max={max_cache_count}, cache_size_mb={self.max_cache_size_mb}, "
+            f"zip={self.enable_zip}, fifo={max_concurrent}, "
+            f"img_max={self.max_image_count}, debug={self.debug_log}"
         )
 
     def _debug(self, msg: str):

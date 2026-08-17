@@ -47,12 +47,6 @@
     "description": "PDF 分辨率 DPI",
     "hint": "影响 PDF 的清晰度与文件大小"
   },
-  "max_pdf_size_mb": {
-    "type": "int",
-    "default": 100,
-    "description": "PDF 大小警告阈值(MB)",
-    "hint": "超过此大小会向用户发送警告提示"
-  },
   "file_server_port": {
     "type": "int",
     "default": 18790,
