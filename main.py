@@ -55,7 +55,7 @@ except ImportError as e:
     DEPENDENCIES_MET = False
 
 
-@register("jmcomic_downloader", "mutidayo3", "JMComic 本子下载器", "0.0.33")
+@register("jmcomic_downloader", "mutidayo3", "JMComic 本子下载器", "0.0.34")
 class JMComicPlugin(Star):
     """JMComic 本子下载器插件 — 编排层。
 
@@ -90,6 +90,7 @@ class JMComicPlugin(Star):
         max_cache_count = max(0, self.config.get('max_cache_count', 20))
         pdf_resolution = self.config.get('pdf_resolution', 150.0)
         self.max_cache_size_mb = self.config.get('max_cache_size_mb', 200)
+        self.upload_retry = max(1, min(self.config.get('upload_retry', 3), 10))
         max_concurrent = max(1, self.config.get('max_concurrent', 1))
         self.rate_limit_window = max(0, self.config.get('rate_limit_window', 300))
         self.max_image_count = max(0, self.config.get('max_image_count', 500))
@@ -134,7 +135,8 @@ class JMComicPlugin(Star):
             f"cleanup={self.auto_cleanup}, dpi={pdf_resolution}, "
             f"cache_max={max_cache_count}, cache_size_mb={self.max_cache_size_mb}, "
             f"zip={self.enable_zip}, fifo={max_concurrent}, "
-            f"img_max={self.max_image_count}, debug={self.debug_log}"
+            f"img_max={self.max_image_count}, retry={self.upload_retry}, "
+            f"debug={self.debug_log}"
         )
 
     def _debug(self, msg: str):
@@ -223,6 +225,7 @@ class JMComicPlugin(Star):
             mode=actual_mode,
             file_server_base_url=self.file_server_base_url,
             debug_callback=self._debug,
+            upload_retry=self.upload_retry,
         )
 
         cached_count = len(self._cache._list_cached())

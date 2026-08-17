@@ -23,7 +23,7 @@ AstrBot 插件，支持通过本子 ID 从 JMComic 下载并自动转换为 PDF 
 | `transfer_mode` | 下拉选择 | `auto` | 文件传输模式：`auto` 自动检测、`local` 本地路径、`docker` HTTP 服务器 |
 | `max_cache_count` | 整数 | `20` | PDF 本地缓存数量上限（0 表示不缓存），按 LRU 淘汰 |
 | `max_workers` | 整数 | `4` | 下载线程数（1~8） |
-| `image_format` | 下拉选择 | `webp` | 下载图片格式：`webp` / `jpg` / `png` |
+| `image_format` | 下拉选择 | `webp` | 下载图片格式：`webp` / `jpg` / `png`。**建议改为 `jpg`**，体积可小数倍（见 Q8） |
 | `download_timeout` | 整数 | `300` | 单本下载超时时间（秒） |
 | `auto_cleanup` | 布尔 | `true` | 发送后是否自动清理临时图片目录 |
 | `pdf_resolution` | 浮点数 | `150.0` | PDF 分辨率 DPI |
@@ -36,6 +36,7 @@ AstrBot 插件，支持通过本子 ID 从 JMComic 下载并自动转换为 PDF 
 | `max_image_count` | 整数 | `500` | 图片数量上限，超过时拒绝下载（0 不限制） |
 | `max_concurrent` | 整数 | `1` | 同时下载的最大并发数（1~4），设为 1 时严格按请求顺序处理 |
 | `debug_log` | 布尔 | `false` | 启用调试日志，输出详尽运行信息 |
+| `upload_retry` | 整数 | `3` | 文件上传总尝试次数（1~10），失败按 3s/6s/12s 退避重试（见 Q9） |
 | `auto_recall` | 布尔 | `true` | 自动撤回状态消息，文件发送后集中撤回，群聊中最终只留下文件 |
 
 ### 传输模式详解
@@ -188,10 +189,32 @@ hostname -I
 ### Q7: 日志显示自动检测的模式不对
 **A**：启动日志会打印判定依据，例如 `自动检测到运行环境: local (容器内=False, 依据: 未发现容器特征)`。如与实际不符，把 `transfer_mode` 显式设为 `local` 或 `docker` 即可，插件不会再自行推断。
 
+### Q8: 生成的 PDF 体积异常大（几百 MB）
+**A**：把 `image_format` 改成 `jpg`。
+
+插件用 img2pdf 生成 PDF，而 img2pdf 的原则是绝不做有损重编码：JPEG 输入会被**原字节直接嵌入**，而 WebP/PNG 因为 PDF 格式不支持，必须先解码成位图再用 Flate 无损压缩塞进去，体积会膨胀数倍。
+
+实测同一本 220 页的本子：
+
+| `image_format` | PDF 体积 | 每页 | 转换耗时 |
+|---|---|---|---|
+| `webp`（默认） | 649 MB | 2.95 MB | 数秒 |
+| `jpg` | **136 MB** | 0.62 MB | **0.5 秒** |
+
+注意 `pdf_resolution` 帮不上忙——它只控制 PDF 页面尺寸，不重新编码图片，因此不影响文件大小。
+
+### Q9: 发送大文件时报 `[Highway] httpUpload Error ... code 102902`
+**A**：这是 QQ 的 Highway 传输通道在随机位置中断，**与文件大小无关**。实测同一个 136 MB 文件三次尝试分别断在 101 MB、51 MB，第三次成功——失败点毫无规律，也不是超时（速率一直有 3~6 MB/s）。
+
+v0.0.34 起上传失败会自动重试（`upload_retry`，默认 3 次，按 3s/6s/12s 退避），绝大多数情况下能自动传成。如果你的网络到腾讯 CDN 特别不稳，可以把 `upload_retry` 调到 5~10。
+
+另外建议先按 Q8 把体积降下来：单次传输的字节越少，中断概率越低。
+
 ## 版本历史
 
 | 版本 | 更新内容 |
 |------|----------|
+| 0.0.34 | **上传失败自动重试 + 澄清体积相关配置**：<br>- QQ 的 Highway 通道会在随机位置中断大文件上传（实测同一个 136 MB 文件三次尝试分别断在 101 MB、51 MB 与成功，与文件大小无关、也非超时），新增 `upload_retry` 配置项（默认 3 次，按 3s/6s/12s 退避），重试耗尽后才回退 File 组件<br>- 修正 `pdf_resolution` 的错误说明：它只通过 `img2pdf.get_layout_fun()` 控制页面尺寸，不重新编码图片，**因此不影响文件大小**<br>- 补充 `image_format` 说明：img2pdf 会把 JPEG 原字节直接嵌入，而 webp/png 必须解码成无损位图，实测同一本子 webp 生成 649 MB、jpg 仅 136 MB 且转换快上百倍。新增 FAQ Q8/Q9 |
 | 0.0.33 | **移除失效的 `max_pdf_size_mb` 配置项**：该项的唯一用途——PDF 超过阈值时向用户发送"文件过大"提示——已在 v0.0.30 的消息合并改动中被删除，配置项自此空转两个版本（只被读取和打印进调试摘要，从不参与任何判断）。现一并清理 `_conf_schema.json`、`main.py` 与文档；WebUI 中该项会消失，已保存的旧值自动失效，无需手动处理 |
 | 0.0.32 | **修复宿主机部署时发送文件失败（`未知文件类型或路径不存在: /files/xxx.pdf`）**：<br>- 修复容器检测误判：旧逻辑扫描 `/proc/1/mountinfo` 是否含 `docker` 字样，而宿主机只要跑过任意容器该文件就会出现 `/var/lib/docker/overlay2/...` 挂载记录，导致宿主机被判为容器<br>- 检测改为只看当前进程自身特征（标记文件、自身 cgroup 中的容器 ID、根文件系统是否为 overlay），并缓存结果，避免运行期容器状态变化导致前后判定不一致<br>- 传输模式只在初始化时解析一次并传给发送器，消除"初始化判为 local、发送时判为 docker"造成的空 `file_server_base_url`<br>- `docker` 模式缺少 `file_server_base_url` 时不再拼出 `/files/xxx.pdf` 相对路径，自动回退为本地路径发送并告警<br>- `local` 模式改用 OneBot `upload_group_file` / `upload_private_file` 直传本地绝对路径，同机部署不再经过 HTTP，大文件更快<br>- HTTP 文件服务器启动失败（如端口占用）时降级为 `local` 模式，不再让插件初始化中断<br>- 上传接口失败时回退 File 组件，群号/QQ 号改用 `get_group_id()` / `get_sender_id()` 获取 |
 | 0.0.31 | **撤回机制优化**：状态消息改为任务完成后集中撤回，避免下载耗时过长时状态消息提前消失

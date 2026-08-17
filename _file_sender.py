@@ -4,8 +4,12 @@
 - local: AstrBot 与协议端（NapCat 等）在同一文件系统，直接把绝对路径交给
   OneBot 的 upload_group_file / upload_private_file
 - docker: 二者文件系统隔离，通过内置 HTTP 文件服务器把文件暴露成 URL 再交给 OneBot
+
+大文件上传会在 QQ 的 Highway 通道上随机中断（实测同一个 136 MB 文件三次尝试分别断在
+101 MB、51 MB 和成功），失败点无规律，与文件大小无关，因此上传失败后自动重试。
 """
 
+import asyncio
 from pathlib import Path
 from typing import Optional, Callable
 from urllib.parse import quote
@@ -19,7 +23,7 @@ class FileSender:
     """文件发送器，按已解析的传输模式发送文件给用户。
 
     统一走 OneBot 的文件上传 API，绕开 AstrBot File 组件在 aiocqhttp 下的已知问题；
-    非 aiocqhttp 平台或上传 API 失败时回退到 File 组件。
+    上传失败自动重试，重试耗尽后回退 File 组件，非 aiocqhttp 平台直接用 File 组件。
     """
 
     def __init__(
@@ -27,6 +31,7 @@ class FileSender:
         mode: str = "local",
         file_server_base_url: str = "",
         debug_callback: Optional[Callable[[str], None]] = None,
+        upload_retry: int = 3,
     ):
         """
         Args:
@@ -34,10 +39,12 @@ class FileSender:
             file_server_base_url: docker 模式下文件服务器的外部访问地址
                 （内置 HTTP 服务器或用户自建的反向代理均可）
             debug_callback: 调试日志回调
+            upload_retry: 上传总尝试次数（含首次），最小 1
         """
         self.mode = "docker" if mode == "docker" else "local"
         self.file_server_base_url = file_server_base_url.rstrip("/") if file_server_base_url else ""
         self._debug = debug_callback or (lambda msg: None)
+        self.upload_retry = max(1, upload_retry)
 
     def _build_file_ref(self, file_path: Path) -> str:
         """构造交给 OneBot 的 file 参数。
@@ -87,11 +94,27 @@ class FileSender:
             await self._send_via_component(event, file_path, file_name)
             return
 
-        try:
-            await self._upload_via_onebot(event, file_ref, file_name)
-            return
-        except Exception as e:
-            logger.error(f"OneBot API 发送文件失败: {e}", exc_info=True)
+        # 上传重试：Highway 通道会在随机位置中断，重试是唯一有效手段。
+        # 失败的尝试通常在 10~30s 内报错，所以退避时间取得较短。
+        for attempt in range(1, self.upload_retry + 1):
+            try:
+                await self._upload_via_onebot(event, file_ref, file_name)
+                if attempt > 1:
+                    logger.info(f"第 {attempt}/{self.upload_retry} 次尝试上传成功: {file_name}")
+                return
+            except Exception as e:
+                if attempt < self.upload_retry:
+                    delay = min(3 * 2 ** (attempt - 1), 15)
+                    logger.warning(
+                        f"OneBot 上传失败（第 {attempt}/{self.upload_retry} 次），"
+                        f"{delay}s 后重试: {e}"
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        f"OneBot 上传连续 {self.upload_retry} 次失败: {e}",
+                        exc_info=True,
+                    )
 
         # 回退 1：改用 AstrBot File 组件（部分协议端更接受消息段形式）
         try:

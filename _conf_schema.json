@@ -26,7 +26,7 @@
     "type": "string",
     "default": "webp",
     "description": "下载图片格式",
-    "hint": "选择从 JMComic 下载的图片原始格式",
+    "hint": "选择从 JMComic 下载的图片原始格式。强烈建议 jpg：img2pdf 能把 JPEG 原字节直接嵌入 PDF，而 webp/png 必须解码成无损位图，实测同一本子 webp 生成 649 MB、jpg 仅 136 MB，且转换快上百倍",
     "options": ["webp", "jpg", "png"]
   },
   "download_timeout": {
@@ -45,7 +45,7 @@
     "type": "float",
     "default": 150.0,
     "description": "PDF 分辨率 DPI",
-    "hint": "影响 PDF 的清晰度与文件大小"
+    "hint": "控制 PDF 页面尺寸（DPI 越高页面越小、印刷越精细）。注意：不会重新编码图片，因此不影响文件大小——想减小体积请把 image_format 设为 jpg"
   },
   "file_server_port": {
     "type": "int",
@@ -108,6 +108,14 @@
     "maximum": 4,
     "description": "同时下载的最大并发数",
     "hint": "限制同时处理的下载请求数量，防止资源耗尽。设为 1 时严格按请求顺序处理，大于 1 时允许并发但仍按顺序放行"
+  },
+  "upload_retry": {
+    "type": "int",
+    "default": 3,
+    "minimum": 1,
+    "maximum": 10,
+    "description": "文件上传重试次数",
+    "hint": "QQ 的 Highway 传输通道会在随机位置中断，大文件尤其明显（与文件大小无关）。此值为总尝试次数，失败后按 3s/6s/12s 退避重试。设为 1 表示不重试"
   },
   "auto_recall": {
     "type": "bool",
