@@ -1,7 +1,9 @@
-"""JMComic 插件工具函数。
+"""运行环境检测与文件系统工具。
 
-提供 Docker 运行环境检测、宿主机 IP 获取、图片文件收集等纯函数。
+提供容器检测、宿主机 IP 推断、图片收集等纯函数，全部无副作用、可独立测试。
 """
+
+from __future__ import annotations
 
 import functools
 import os
@@ -13,61 +15,54 @@ from pathlib import Path
 # 匹配 /docker/<id>、/system.slice/docker-<id>.scope、/kubepods/...、/lxc/<name>，
 # 但不匹配宿主机上名字里带 docker 的 systemd 单元（如 docker.service）。
 _CONTAINER_CGROUP_RE = re.compile(
-    r'/(?:docker|containerd|crio|libpod|podman)[/-][0-9a-f]{12,}'
-    r'|/kubepods'
-    r'|/lxc/'
+    r"/(?:docker|containerd|crio|libpod|podman)[/-][0-9a-f]{12,}"
+    r"|/kubepods"
+    r"|/lxc/"
 )
 
 
 @functools.lru_cache(maxsize=1)
 def _detect_container() -> tuple[bool, str]:
-    """检测当前进程是否运行在容器内，返回 (结果, 判定依据)。
+    """检测当前进程是否运行在容器内，返回 ``(结果, 判定依据)``。
 
-    只依据【当前进程自身】的特征判断，绝不检查宿主机的全局状态：
-    - /.dockerenv、/run/.containerenv 标记文件（最可靠）
-    - 自身 / PID 1 的 cgroup 路径中的容器 ID（cgroup v1、kubepods）
-    - 根文件系统为 overlay（无标记文件的精简镜像兜底）
-    - 环境变量 container
+    只依据**当前进程自身**的特征判断，绝不检查宿主机的全局状态。
 
     【历史坑】旧版本会扫描 /proc/1/mountinfo 中是否含 "docker" 字样，
     但宿主机只要跑过任意容器，该文件就会出现 /var/lib/docker/overlay2/...
-    挂载记录，于是宿主机被误判为容器，插件转而走 HTTP 传输模式，
-    最终因缺少 file_server_base_url 而发送失败。切勿恢复该检查。
+    挂载记录，于是宿主机被误判为容器。切勿恢复该检查。
     """
     # 1. 容器运行时标记文件（Docker / Podman，最可靠）
-    for marker in ('/.dockerenv', '/run/.containerenv'):
+    for marker in ("/.dockerenv", "/run/.containerenv"):
         if os.path.exists(marker):
             return True, f"存在标记文件 {marker}"
 
     # 2. 自身与 PID 1 的 cgroup 路径中带容器 ID（cgroup v1 / Kubernetes）
-    for cgroup_file in ('/proc/self/cgroup', '/proc/1/cgroup'):
+    for cgroup_file in ("/proc/self/cgroup", "/proc/1/cgroup"):
         try:
-            with open(cgroup_file, 'r') as f:
+            with open(cgroup_file, encoding="utf-8") as f:
                 for line in f:
-                    # 格式: hierarchy-ID:controller-list:cgroup-path
-                    path = line.rstrip('\n').split(':', 2)[-1]
+                    path = line.rstrip("\n").split(":", 2)[-1]
                     if _CONTAINER_CGROUP_RE.search(path):
                         return True, f"{cgroup_file} 含容器 cgroup 路径: {path}"
-        except Exception:
+        except OSError:
             continue
 
     # 3. 根文件系统为 overlay（cgroup v2 容器常见，宿主机通常是 ext4/xfs/btrfs）
     try:
-        with open('/proc/self/mountinfo', 'r') as f:
+        with open("/proc/self/mountinfo", encoding="utf-8") as f:
             for line in f:
-                # 格式: ... mount-point options [optional fields] - fstype source superopts
-                left, sep, right = line.partition(' - ')
+                left, sep, right = line.partition(" - ")
                 if not sep:
                     continue
                 fields = left.split()
-                if len(fields) > 4 and fields[4] == '/' and right.split()[0] == 'overlay':
+                if len(fields) > 4 and fields[4] == "/" and right.split()[0] == "overlay":
                     return True, "根文件系统为 overlay"
-    except Exception:
+    except OSError:
         pass
 
-    # 4. 环境变量（systemd-nspawn / Podman / LXC 会设置）
-    env_container = os.environ.get('container', '')
-    if env_container in ('docker', 'podman', 'oci', 'lxc', 'containerd'):
+    # 4. 环境变量（systemd-nspawn / Podman / LXC 会设置，变量名本就是小写）
+    env_container = os.environ.get("container", "")  # noqa: SIM112
+    if env_container in ("docker", "podman", "oci", "lxc", "containerd"):
         return True, f"环境变量 container={env_container}"
 
     return False, "未发现容器特征"
@@ -95,47 +90,40 @@ def get_host_ip(file_server_port: int = 18790) -> str:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.settimeout(2)
-            # 尝试连接一个公网地址以触发路由表选择本地出口 IP
+            # 连接公网地址以触发路由表选择本地出口 IP（不会真正发包）
             s.connect(("8.8.8.8", 80))
             local_ip = s.getsockname()[0]
-        # 如果是内网地址，通常 NapCat 可以通过该 IP 访问宿主机
-        if local_ip.startswith("192.168.") or local_ip.startswith("10.") or local_ip.startswith("172."):
+        if local_ip.startswith(("192.168.", "10.", "172.")):
             return local_ip
-    except Exception:
+    except OSError:
         pass
 
     # 备选方案：尝试常见的 Docker 网关
-    for gateway in ["172.17.0.1", "172.18.0.1", "192.168.65.1"]:
+    for gateway in ("172.17.0.1", "172.18.0.1", "192.168.65.1"):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(1)
-                result = s.connect_ex((gateway, file_server_port))
-            if result == 0:
-                return gateway
-        except Exception:
+                if s.connect_ex((gateway, file_server_port)) == 0:
+                    return gateway
+        except OSError:
             continue
 
     return "127.0.0.1"
 
 
 def collect_image_files(image_dir: Path) -> list[Path]:
-    """收集并排序图片文件。
-
-    递归扫描目录下所有图片，按文件名中的数字排序。
-    修复了 filter 命名冲突导致的排序问题。
-    """
+    """递归收集并按文件名中的数字排序图片文件。"""
     if not image_dir or not image_dir.exists():
         return []
 
     image_files = [
-        f for f in image_dir.rglob('*')
-        if f.is_file() and f.suffix.lower() in {'.webp', '.jpg', '.jpeg', '.png', '.gif'}
+        f
+        for f in image_dir.rglob("*")
+        if f.is_file() and f.suffix.lower() in {".webp", ".jpg", ".jpeg", ".png", ".gif"}
     ]
 
-    # 按文件名数字排序（修复 filter 命名冲突）
-    def sort_key(p: Path):
-        stem = p.stem
-        digits = ''.join([c for c in stem if c.isdigit()])
-        return (int(digits) if digits else 0, stem)
+    def sort_key(p: Path) -> tuple[int, str]:
+        digits = "".join(ch for ch in p.stem if ch.isdigit())
+        return (int(digits) if digits else 0, p.stem)
 
     return sorted(image_files, key=sort_key)

@@ -24,10 +24,10 @@
   },
   "image_format": {
     "type": "string",
-    "default": "webp",
+    "default": "jpg",
     "description": "下载图片格式",
-    "hint": "选择从 JMComic 下载的图片原始格式。强烈建议 jpg：img2pdf 能把 JPEG 原字节直接嵌入 PDF，而 webp/png 必须解码成无损位图，实测同一本子 webp 生成 649 MB、jpg 仅 136 MB，且转换快上百倍",
-    "options": ["webp", "jpg", "png"]
+    "hint": "强烈建议 jpg：img2pdf 能把 JPEG 原字节直接嵌入 PDF，而 webp/png 必须解码成无损位图，实测同一本子 webp 生成 649 MB、jpg 仅 136 MB，且转换快上百倍",
+    "options": ["jpg", "webp", "png"]
   },
   "download_timeout": {
     "type": "int",
@@ -44,12 +44,16 @@
   "pdf_resolution": {
     "type": "float",
     "default": 150.0,
+    "minimum": 1.0,
+    "maximum": 1200.0,
     "description": "PDF 分辨率 DPI",
-    "hint": "控制 PDF 页面尺寸（DPI 越高页面越小、印刷越精细）。注意：不会重新编码图片，因此不影响文件大小——想减小体积请把 image_format 设为 jpg"
+    "hint": "控制 PDF 页面尺寸（DPI 越高页面越小、印刷越精细）。不会重新编码图片，因此不影响文件大小——想减小体积请把 image_format 设为 jpg"
   },
   "file_server_port": {
     "type": "int",
     "default": 18790,
+    "minimum": 1,
+    "maximum": 65535,
     "description": "HTTP 文件服务器端口",
     "hint": "Docker 模式下需将此端口映射到宿主机"
   },
@@ -57,7 +61,7 @@
     "type": "string",
     "default": "",
     "description": "文件服务器外网地址",
-    "hint": "如 http://172.17.0.1:18790。Docker 模式下必填或留空自动推断"
+    "hint": "如 http://172.17.0.1:18790（只填到端口，不要带 /files）。Docker 模式下必填或留空自动推断"
   },
   "enable_zip": {
     "type": "bool",
@@ -93,7 +97,7 @@
     "minimum": 0,
     "maximum": 10000,
     "description": "图片数量上限",
-    "hint": "漫画图片数量超过此值时拒绝下载，防止超大本子耗尽资源。0 表示不限制"
+    "hint": "漫画图片数量超过此值时拒绝下载，防止超大本子耗尽内存。下载前按章节累加真实图片数预检，转 PDF 前再按实际下载到的图片数精确复核。0 表示不限制"
   },
   "debug_log": {
     "type": "bool",

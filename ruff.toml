@@ -1,0 +1,41 @@
+# ruff 配置 — 遵循 AstrBot 规范“提交前用 ruff 格式化代码”
+target-version = "py310"
+line-length = 100
+extend-exclude = [".git", "__pycache__"]
+
+[lint]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "W",     # pycodestyle warnings
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "RUF",   # ruff-specific
+    "PIE",   # flake8-pie
+    "S",     # flake8-bandit
+]
+ignore = [
+    # 广义异常捕获是插件健壮性的有意设计：AstrBot 规范要求“不要让插件因
+    # 一个错误而崩溃”，因此在网络/IO/下载边界统一捕获 Exception 是合理的。
+    "BLE001",
+    # 子进程关闭、撤回等尽力而为的场景下 try/except/pass 是预期行为。
+    "S110",
+    "S112",
+    # 含 await 的嵌套 if 拆开可读性更好，不强行合并。
+    "SIM102",
+    # HTTP 文件服务器需要绑定 0.0.0.0 以供跨容器访问。
+    "S104",
+    # 本插件面向中文用户，字符串/注释/文档串中的中文全角标点
+    # （，。：；！？等）是预期内容，而非误输入，关闭歧义检测。
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[lint.per-file-ignores]
+# main.py 必须在导入 jmcomic_core 前先注入 sys.path，导入不在文件顶部是必要的。
+"main.py" = ["E402"]
+# worker 在子进程中执行，multiprocessing 是设计需要。
+"jmcomic_core/worker.py" = ["S301"]

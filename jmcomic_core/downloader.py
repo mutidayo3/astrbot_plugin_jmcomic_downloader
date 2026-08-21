@@ -1,24 +1,21 @@
 """JMComic 下载器（子进程隔离）。
 
-使用 multiprocessing.spawn + Pipe 通信将下载任务隔离到独立子进程，
+使用 ``multiprocessing.spawn`` + Pipe 通信将下载任务隔离到独立子进程，
 支持超时终止、SIGTERM 诊断、exitcode 分析等功能。
 """
+
+from __future__ import annotations
 
 import asyncio
 import multiprocessing
 import shutil
 import signal
-import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Optional, Callable, Set
 
 from astrbot.api import logger
 
-# 确保插件目录在 sys.path 中（保证 multiprocessing.spawn 子进程能找到 _download_worker 模块）
-_plugin_dir = str(Path(__file__).resolve().parent)
-if _plugin_dir not in sys.path:
-    sys.path.insert(0, _plugin_dir)
-from _download_worker import download_album_worker
+from jmcomic_core.worker import download_album_worker
 
 
 class Downloader:
@@ -26,8 +23,8 @@ class Downloader:
 
     特性：
     - 使用 spawn 上下文避免污染插件框架
-    - Pipe 通信替代 Queue，消除 join_thread() 阻塞
-    - 超时后两级终止（SIGTERM → SIGKILL）
+    - Pipe 通信替代 Queue，消除 ``join_thread()`` 阻塞
+    - 超时后两级终止（SIGTERM -> SIGKILL）
     - 详细的 exitcode 诊断（OOM Killer、崩溃等）
     - 支持外部 active_processes 集合追踪，便于统一清理
     """
@@ -35,26 +32,26 @@ class Downloader:
     def __init__(
         self,
         max_workers: int = 4,
-        image_format: str = "webp",
+        image_format: str = "jpg",
         download_timeout: int = 300,
-        debug_callback: Optional[Callable[[str], None]] = None,
-        active_processes: Optional[Set[multiprocessing.Process]] = None,
-    ):
+        debug_callback: Callable[[str], None] | None = None,
+        active_processes: set[multiprocessing.Process] | None = None,
+    ) -> None:
         self.max_workers = max_workers
         self.image_format = image_format
         self.download_timeout = download_timeout
         self._debug = debug_callback or (lambda msg: None)
-        self._active_processes: Set[multiprocessing.Process] = active_processes or set()
+        self._active_processes: set[multiprocessing.Process] = active_processes or set()
 
     async def download(self, album_id: str, download_dir: Path) -> str:
-        """异步下载本子并返回标题。
+        """异步下载本子并返回原始标题。
 
         Args:
             album_id: 本子 ID
             download_dir: 下载目标目录（必须已存在）
 
         Returns:
-            本子标题（非法字符已清理）
+            本子原始标题（未经文件名清理）
 
         Raises:
             RuntimeError: 下载失败或子进程异常
@@ -67,7 +64,7 @@ class Downloader:
         )
 
         loop = asyncio.get_running_loop()
-        ctx = multiprocessing.get_context('spawn')
+        ctx = multiprocessing.get_context("spawn")
         parent_conn, child_conn = ctx.Pipe(duplex=False)
 
         process = ctx.Process(
@@ -89,23 +86,13 @@ class Downloader:
             # 从 Pipe 读取结果（进程已结束，数据在缓冲区中，非阻塞）
             if parent_conn.poll():
                 status, value = parent_conn.recv()
-                if status == 'ok':
+                if status == "ok":
                     album_title = value
                 else:
                     raise RuntimeError(f"下载失败: {value}")
             else:
                 # 子进程未发送任何数据即退出，根据 exitcode 提供诊断信息
-                ec = process.exitcode
-                if ec is not None and ec < 0:
-                    sig_name = signal.Signals(-ec).name if hasattr(signal, 'Signals') else f'signal {-ec}'
-                    detail = f"子进程被信号杀死 ({sig_name}, exitcode={ec})"
-                    if -ec == getattr(signal, 'SIGKILL', 9):
-                        detail += "，可能是 OOM Killer 介入，请检查系统内存"
-                elif ec == 0:
-                    detail = f"子进程正常退出但未返回结果 (exitcode={ec})，可能是 jmcomic 库内部异常"
-                else:
-                    detail = f"子进程异常退出 (exitcode={ec})，可能是未捕获的异常或崩溃"
-                raise RuntimeError(detail)
+                raise RuntimeError(self._diagnose_exitcode(process.exitcode))
 
         except asyncio.TimeoutError:
             logger.error(f"下载子进程超时，正在终止: PID={process.pid}")
@@ -132,6 +119,23 @@ class Downloader:
             self._active_processes.discard(process)
             self._debug(f"下载子进程已结束: PID={process.pid}, exitcode={process.exitcode}")
 
-        file_count = sum(1 for _ in download_dir.rglob('*') if _.is_file())
+        file_count = sum(1 for _ in download_dir.rglob("*") if _.is_file())
         logger.info(f"下载完成: {album_title} (共 {file_count} 个文件)")
         return album_title
+
+    @staticmethod
+    def _diagnose_exitcode(exitcode: int | None) -> str:
+        """根据子进程 exitcode 生成人类可读的诊断信息。"""
+        if exitcode is not None and exitcode < 0:
+            sig_name = (
+                signal.Signals(-exitcode).name
+                if hasattr(signal, "Signals")
+                else f"signal {-exitcode}"
+            )
+            detail = f"子进程被信号杀死 ({sig_name}, exitcode={exitcode})"
+            if -exitcode == getattr(signal, "SIGKILL", 9):
+                detail += "，可能是 OOM Killer 介入，请检查系统内存"
+            return detail
+        if exitcode == 0:
+            return f"子进程正常退出但未返回结果 (exitcode={exitcode})，可能是 jmcomic 库内部异常"
+        return f"子进程异常退出 (exitcode={exitcode})，可能是未捕获的异常或崩溃"

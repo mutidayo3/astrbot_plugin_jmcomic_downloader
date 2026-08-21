@@ -1,14 +1,21 @@
-"""文件转换工具：图片→PDF 转换 + PDF→ZIP 压缩。
+"""文件转换工具：图片 -> PDF 转换 + PDF -> ZIP 压缩。
 
 PDF 转换使用 img2pdf 流式处理，支持 DPI 控制及超时保护。
 ZIP 压缩使用 pyzipper 实现 AES-256 强加密。
 """
 
+from __future__ import annotations
+
 import asyncio
 from pathlib import Path
-from typing import Optional
 
 from astrbot.api import logger
+
+# A4 在 72 DPI 下的像素尺寸，同时也正好是 A4 的点数（1pt = 1/72in）。
+# 页面尺寸按 “把这些像素重新按用户设定的 DPI 解读” 换算，故 DPI 越高页面越小、
+# 印刷越精细；不涉及任何图片重编码，因此不影响文件体积。
+_A4_WIDTH_PX_AT_72DPI = 595.276
+_A4_HEIGHT_PX_AT_72DPI = 841.890
 
 
 async def convert_to_pdf(
@@ -20,14 +27,14 @@ async def convert_to_pdf(
     """使用 img2pdf 将图片列表转换为单个 PDF 文件。
 
     特性：
-    - 直接读取图片二进制内容传给 img2pdf，规避路径类型兼容问题
+    - 直接把 ``Path`` 交给 img2pdf，由它逐张读取，避免多存一份全量字节
     - 使用 layout_fun 在 PDF 层面控制页面尺寸，基于 DPI 换算
     - 超时保护，防止转换无限挂起
 
     Args:
         image_files: 已排序的图片文件路径列表
         pdf_path: 输出 PDF 路径
-        pdf_resolution: 目标 DPI（影响清晰度与文件大小）
+        pdf_resolution: 目标 DPI（影响页面尺寸，不影响文件大小）
         pdf_timeout: 超时时间（秒）
 
     Returns:
@@ -41,30 +48,25 @@ async def convert_to_pdf(
     loop = asyncio.get_running_loop()
     page_count = len(image_files)
 
-    def _do_convert():
+    def _do_convert() -> None:
         import img2pdf
 
-        # 直接读取图片二进制内容，彻底避免 img2pdf 路径兼容问题
-        # （部分版本对 bytes/str 路径处理不一致，导致 TypeError）
-        logger.info(f"正在读取 {page_count} 张图片...")
-        image_data = []
-        for i, p in enumerate(image_files):
-            image_data.append(p.read_bytes())
-            if (i + 1) % 50 == 0 or (i + 1) == page_count:
-                logger.info(f"已读取 {i + 1}/{page_count} 张图片")
-
-        # 使用 layout_fun 在 PDF 层面控制页面尺寸（基于 DPI 换算）
-        # img2pdf 原生机制，无需对图片做任何重编码
+        # img2pdf 会对每个入参尝试 read()/read_bytes()，因此 Path 可直接传入。
+        # 不要先自己 read_bytes() 攒成 list：img2pdf 内部本来就要把所有图片字节
+        # 留在内存里直到写出，自己再存一份等于把峰值内存翻倍（实测 141 MB 的
+        # JPEG 会让 RSS 涨 143 MB），大本子极易触发 OOM Killer。
         dpi = pdf_resolution
-        a4_width_pt, a4_height_pt = 595.276, 841.890  # A4 纸张点数
         layout_fun = img2pdf.get_layout_fun(
-            (a4_width_pt / dpi * 72, a4_height_pt / dpi * 72),
-            None, None, None, None,
+            (_A4_WIDTH_PX_AT_72DPI / dpi * 72, _A4_HEIGHT_PX_AT_72DPI / dpi * 72),
+            None,
+            None,
+            None,
+            None,
         )
 
-        logger.info("正在生成 PDF 文档...")
+        logger.info(f"正在生成 PDF 文档（{page_count} 页）...")
         with open(pdf_path, "wb") as f:
-            img2pdf.convert(image_data, outputstream=f, layout_fun=layout_fun)
+            img2pdf.convert(image_files, outputstream=f, layout_fun=layout_fun)
 
         size_mb = pdf_path.stat().st_size / (1024 * 1024)
         logger.info(f"PDF 生成成功: {pdf_path.name} ({size_mb:.1f} MB, {page_count} 页)")
@@ -78,7 +80,7 @@ async def convert_to_pdf(
         logger.error(f"PDF 转换超时 ({pdf_timeout}s)，图片数量: {page_count}")
         if pdf_path.exists():
             pdf_path.unlink()
-        raise RuntimeError(f"PDF 转换超时（{pdf_timeout}秒），请减少图片数量或稍后重试")
+        raise RuntimeError(f"PDF 转换超时（{pdf_timeout}秒），请减少图片数量或稍后重试") from None
 
     return pdf_path
 
@@ -87,10 +89,10 @@ async def compress_to_zip(
     pdf_path: Path,
     zip_path: Path,
     password: str = "",
-) -> Optional[Path]:
+) -> Path | None:
     """将 PDF 压缩为 ZIP 文件（支持 AES-256 加密，仅存储模式以节省 CPU）。
 
-    使用 pyzipper 实现真正的加密写入。ZIP_STORED 模式不做二次压缩，
+    使用 pyzipper 实现真正的加密写入。``ZIP_STORED`` 模式不做二次压缩，
     因为 PDF 本身已是压缩格式。
 
     Args:
@@ -104,22 +106,19 @@ async def compress_to_zip(
     import pyzipper
 
     logger.info(f"正在打包 PDF (Store 模式): {pdf_path.name} -> {zip_path.name}")
-
     loop = asyncio.get_running_loop()
 
-    def _do_compress():
+    def _do_compress() -> Path | None:
         try:
-            # 使用 pyzipper 实现真正的加密写入
-            # compression=pyzipper.ZIP_STORED: 仅存储，不进行算法压缩，极大降低 CPU 开销
             with pyzipper.AESZipFile(
-                zip_path, 'w',
+                zip_path,
+                "w",
                 compression=pyzipper.ZIP_STORED,
                 encryption=pyzipper.WZ_AES if password else None,
             ) as zf:
                 if password:
-                    zf.setpassword(password.encode('utf-8'))
-                    # 设置 AES 加密强度 (256 bit)
-                    zf.setencryption(pyzipper.WZ_AES, nbits=256)
+                    zf.setpassword(password.encode("utf-8"))
+                    zf.setencryption(pyzipper.WZ_AES, nbits=256)  # AES-256
                 zf.write(pdf_path, arcname=pdf_path.name)
             return zip_path
         except Exception as e:
